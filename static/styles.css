@@ -233,10 +233,14 @@ button:disabled {
     padding: 0.2rem 0.4rem;
     border-radius: 4px;
     font-size: 0.9em;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 .markdown-body pre code {
     background: transparent;
     padding: 0;
+    word-break: normal;
+    overflow-wrap: normal;
 }
 
 .sources-section {
