@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trace | AI Repo Investigator</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Marked.js for Markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code blocks -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="background-blob blob-1"></div>
+    <div class="background-blob blob-2"></div>
+
+    <div class="app-container">
+        <header>
+            <h1 class="logo">Trace</h1>
+            <p class="subtitle">Deep AI Investigation of GitHub Repositories</p>
+        </header>
+
+        <main class="glass-panel">
+            <form id="investigate-form">
+                <div class="input-group">
+                    <label for="repo-url">GitHub Repository URL</label>
+                    <input type="url" id="repo-url" placeholder="https://github.com/owner/repo" required>
+                </div>
+                <div class="input-group">
+                    <label for="question">What do you want to know?</label>
+                    <textarea id="question" placeholder="E.g., How does the core routing logic work? Where is the database initialized?" required rows="3"></textarea>
+                </div>
+                <button type="submit" id="submit-btn">
+                    <span class="btn-text">Investigate</span>
+                    <div class="spinner hidden"></div>
+                </button>
+            </form>
+
+            <div id="results-container" class="hidden">
+                <div class="meta-data">
+                    <div class="meta-badge"><span id="repo-stars"></span> ⭐</div>
+                    <div class="meta-badge"><span id="repo-lang"></span></div>
+                </div>
+                <div class="markdown-body" id="answer-box"></div>
+                <div class="sources-section">
+                    <h3>Deep Evidence Sources Fetched</h3>
+                    <ul id="sources-list"></ul>
+                </div>
+            </div>
+            <div id="error-container" class="hidden error-box"></div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

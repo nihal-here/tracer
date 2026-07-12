@@ -8,6 +8,7 @@ from pydantic import HttpUrl
 from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
 from app.services.answer_service import compose_answer
 from app.services.llm_provider import select_files
+from app.services.cache_service import get_cached_response,set_cached_response
 
 logger = logging.getLogger(__name__)
 
@@ -16,21 +17,43 @@ NOISE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".
 NOISE_FOLDERS = (".git/", ".venv/", "venv/", "node_modules/", "__pycache__/")
 
 
-def _github_get(endpoint: str, ignore_404: bool = False) -> requests.Response | None:
+def _github_get(endpoint: str, ignore_404: bool = False) -> dict| list | None:
     """Helper to deduplicate GitHub API requests and error handling."""
+
+    # check cache first
+    cached=get_cached_response(endpoint)
+    if cached is not None:
+        logger.info("CACHE HIT: %s",endpoint)
+        return cached
+
+    # no cache make the http request
     url = f"{GITHUB_API_BASE}{endpoint}"
-    response = requests.get(url, timeout=5)
+
+    import os
+    headers = {}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = requests.get(url, headers=headers, timeout=5)
 
     if response.status_code == 404:
         if ignore_404:
             return None
         raise HTTPException(status_code=404, detail=f"Not found: {endpoint}")
 
+    if response.status_code == 403:
+        raise HTTPException(status_code=502, detail="GitHub API rate limit exceeded! Please add a GITHUB_TOKEN to your .env file.")
+
     if response.status_code != 200:
         raise HTTPException(status_code=502, detail=f"GitHub API request failed for {endpoint}")
 
     logger.info("fetched %s successfully --> statuscode:%s", endpoint, response.status_code)
-    return response
+
+
+    data =response.json()
+    set_cached_response(endpoint,data)
+    return data
 
 
 def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
@@ -128,15 +151,17 @@ def parse_gh_url(repo: HttpUrl) -> tuple[str, str]:
 
 def fetch_repo_metadata(owner: str, name: str) -> dict:
     response = _github_get(f"/{owner}/{name}")
-    return response.json() if response else {}
+    if isinstance(response, dict):
+        return response
+    return {}
 
 
 def fetch_readme(owner: str, name: str) -> str | None:
     response = _github_get(f"/{owner}/{name}/readme", ignore_404=True)
-    if not response:
+    if not isinstance(response, dict):
         return None
 
-    content = response.json().get("content")
+    content = response.get("content")
     return base64.b64decode(content).decode("utf-8") if content else None
 
 
@@ -145,31 +170,33 @@ def fetch_top_level_files(owner: str, name: str) -> list[str]:
     if not response:
         return []
 
-    payload = response.json()
-    if not isinstance(payload, list):
+    if not isinstance(response, list):
         return []
 
-    return [item["name"] for item in payload if "name" in item]
+    return [item["name"] for item in response if "name" in item]
 
 
 def fetch_repo_tree(owner: str, name: str, default_branch: str) -> list[str]:
     response = _github_get(f"/{owner}/{name}/git/trees/{default_branch}?recursive=1")
-    if not response:
+    if not isinstance(response, dict):
         return []
 
-    tree_payload = response.json().get("tree", [])
-    return [item["path"] for item in tree_payload if item.get("type") == "blob"]
+    tree_payload = response.get("tree", [])
+    return [item["path"] for item in tree_payload if isinstance(item, dict) and item.get("type") == "blob"]
 
 
 def fetch_file_contents(owner: str, name: str, file_paths: list[str]) -> dict[str, str]:
     file_contents = {}
     for path in file_paths:
         response = _github_get(f"/{owner}/{name}/contents/{path}", ignore_404=True)
-        if not response:
+        if not isinstance(response, dict):
             continue
 
-        content = response.json().get("content")
-        file_contents[path] = base64.b64decode(content).decode("utf-8") if content else ""
+        content = response.get("content")
+        if isinstance(content, str):
+            file_contents[path] = base64.b64decode(content).decode("utf-8")
+        else:
+            file_contents[path] = ""
 
     return file_contents
 
