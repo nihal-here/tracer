@@ -21,6 +21,14 @@ def compose_answer(question: str, context: dict) -> str:
 
 
 def build_prompt(question: str, context: dict) -> str:
+    # Build a string of the specific file contents we gathered
+    files_context = ""
+    file_contents = context.get("file_contents", {})
+    if file_contents:
+        files_context = "\nSpecific File Contents:\n"
+        for path, content in file_contents.items():
+            files_context += f"\n--- {path} ---\n{content}\n"
+
     return f"""
 You are a helpful assistant that investigates GitHub repositories to answer questions.
 
@@ -38,7 +46,7 @@ Repository context:
 - top_level_files: {context["top_level_files"]}
 - detected_stack: {context["detected_stack"]}
 - default_branch: {context["default_branch"]}
-
+{files_context}
 Instructions:
 - Answer using only the repository context above.
 - Be concise and specific.
