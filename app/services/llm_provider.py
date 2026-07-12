@@ -22,6 +22,23 @@ def generate_answer(prompt: str) -> str:
     return response.text or ""
 
 
+def generate_answer_stream(prompt: str):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set")
+
+    client = genai.Client(api_key=api_key)
+    model = os.environ.get("TRACE_LLM_MODEL", "gemini-3.1-flash-lite")
+
+    response_stream = client.models.generate_content_stream(
+        model=model,
+        contents=prompt,
+    )
+
+    for chunk in response_stream:
+        yield chunk.text or ""
+
+
 class FileSelection(BaseModel):
     selected_files: list[str] = Field(
         description="List of exact file paths (max 5) most relevant to the question."

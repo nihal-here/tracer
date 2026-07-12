@@ -1,5 +1,6 @@
 import base64
 import logging
+import json
 import requests
 import os
 
@@ -7,7 +8,7 @@ from fastapi import HTTPException
 from pydantic import HttpUrl
 
 from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
-from app.services.answer_service import compose_answer
+from app.services.answer_service import compose_answer, compose_answer_stream
 from app.services.llm_provider import select_files
 from app.services.cache_service import get_cached_response, set_cached_response
 from app.services.vector_cache_service import get_semantic_cache, set_semantic_cache
@@ -127,6 +128,81 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
 
     logger.info("--- Investigation Complete ---")
     return final_response
+
+
+def investigate_repo_stream(repo_url: HttpUrl, question: str):
+    url_str = str(repo_url)
+    logger.info("--- Starting Streaming Investigation ---")
+    logger.info("Repo: %s", url_str)
+    logger.info("Question: %s", question)
+
+    # 1. True Semantic Caching Check
+    semantic_hit = get_semantic_cache(url_str, question)
+    if semantic_hit:
+        logger.info("Returning instantly from Semantic Cache (ChromaDB)!")
+        meta = semantic_hit.copy()
+        full_answer = meta.pop("answer", "")
+        yield f"data: {json.dumps({'metadata': meta})}\n\n"
+        yield f"data: {json.dumps({'chunk': full_answer})}\n\n"
+        return
+
+    owner, name = parse_gh_url(repo_url)
+
+    payload = fetch_repo_metadata(owner, name)
+    readme_content = fetch_readme(owner, name)
+    top_level_files = fetch_top_level_files(owner, name)
+    repo_tree = fetch_repo_tree(owner, name, payload.get("default_branch", "main"))
+
+    file_list = select_files(question, repo_tree)
+    file_contents = fetch_file_contents(owner, name, file_list)
+
+    context = {
+        "owner": owner,
+        "name": name,
+        "language": payload.get("language", ""),
+        "description": payload.get("description", ""),
+        "stars": payload.get("stargazers_count", 0),
+        "readme_available": readme_content is not None,
+        "readme_preview": readme_content[:500] if readme_content else "",
+        "top_level_files": ", ".join(top_level_files),
+        "detected_stack": "",
+        "default_branch": payload.get("default_branch", "main"),
+        "file_contents": file_contents,
+    }
+
+    summary = f"{owner}/{name} is a GitHub repository with {payload.get('stargazers_count', 0)} stars, written in {payload.get('language', 'Unknown')}. {payload.get('description', '')}"
+
+    meta = {
+        "repo": url_str,
+        "provider": "github",
+        "owner": owner,
+        "name": name,
+        "question": question,
+        "description": payload.get("description", ""),
+        "stars": payload.get("stargazers_count", 0),
+        "language": payload.get("language", ""),
+        "summary": summary,
+        "readme_available": readme_content is not None,
+        "sources": ["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list,
+    }
+    
+    yield f"data: {json.dumps({'metadata': meta})}\n\n"
+
+    logger.info("Generating streamed answer using Gemini...")
+    full_answer = ""
+    for chunk in compose_answer_stream(question, context):
+        full_answer += chunk
+        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+    logger.info("Answer stream completed successfully.")
+
+    # Save the final response to Vector DB for future queries
+    if full_answer and "Answer generation failed" not in full_answer:
+        meta["answer"] = full_answer
+        set_semantic_cache(url_str, question, meta)
+    else:
+        logger.warning("Answer generation failed, skipping cache insertion.")
+
+    logger.info("--- Streaming Investigation Complete ---")
 
 
 def readme_repo(repo: HttpUrl) -> ReadmeResponse:

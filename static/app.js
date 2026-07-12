@@ -42,36 +42,72 @@ document.addEventListener("DOMContentLoaded", () => {
                 })
             });
 
-            const data = await response.json();
-
             if (!response.ok) {
+                const data = await response.json();
                 throw new Error(data.detail || "An error occurred during investigation.");
             }
 
-            // Populate Meta
-            repoStars.textContent = data.stars.toLocaleString();
-            repoLang.textContent = data.language || "Unknown";
+            // Read the stream
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let done = false;
+            let fullAnswer = "";
+            let buffer = "";
 
-            // Populate Answer with Marked.js
-            answerBox.innerHTML = marked.parse(data.answer);
-            
-            // Apply highlight.js to code blocks
-            document.querySelectorAll('pre code').forEach((block) => {
-                hljs.highlightElement(block);
-            });
-
-            // Populate Sources
-            sourcesList.innerHTML = "";
-            if (data.sources && data.sources.length > 0) {
-                data.sources.forEach(source => {
-                    const li = document.createElement("li");
-                    li.textContent = source;
-                    sourcesList.appendChild(li);
-                });
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                done = readerDone;
+                if (value) {
+                    buffer += decoder.decode(value, { stream: !done });
+                    
+                    // SSE format is data: {...}\n\n
+                    // A chunk might contain multiple data: lines, and might be cut off halfway
+                    const lines = buffer.split("\n\n");
+                    
+                    // The last element is either an empty string (if it ended perfectly with \n\n)
+                    // or a partial message. We keep it in the buffer for the next chunk.
+                    buffer = lines.pop(); 
+                    
+                    for (const line of lines) {
+                        if (line.startsWith("data: ")) {
+                            const dataStr = line.substring(6);
+                            try {
+                                const data = JSON.parse(dataStr);
+                                if (data.metadata) {
+                                    // Populate Meta
+                                    repoStars.textContent = data.metadata.stars.toLocaleString();
+                                    repoLang.textContent = data.metadata.language || "Unknown";
+                                    
+                                    // Populate Sources
+                                    sourcesList.innerHTML = "";
+                                    if (data.metadata.sources && data.metadata.sources.length > 0) {
+                                        data.metadata.sources.forEach(source => {
+                                            const li = document.createElement("li");
+                                            li.textContent = source;
+                                            sourcesList.appendChild(li);
+                                        });
+                                    }
+                                    
+                                    // Show Results instantly
+                                    resultsContainer.classList.remove("hidden");
+                                }
+                                if (data.chunk) {
+                                    fullAnswer += data.chunk;
+                                    // Populate Answer with Marked.js
+                                    answerBox.innerHTML = marked.parse(fullAnswer);
+                                    
+                                    // Apply highlight.js to code blocks
+                                    document.querySelectorAll('pre code').forEach((block) => {
+                                        hljs.highlightElement(block);
+                                    });
+                                }
+                            } catch (err) {
+                                console.error("Error parsing JSON chunk", err, dataStr);
+                            }
+                        }
+                    }
+                }
             }
-
-            // Show Results
-            resultsContainer.classList.remove("hidden");
 
         } catch (error) {
             errorContainer.textContent = error.message;
