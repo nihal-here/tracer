@@ -1,0 +1,46 @@
+import logging
+
+from fastapi import HTTPException
+
+from app.services.llm_provider import generate_answer
+
+
+logger = logging.getLogger(__name__)
+
+
+def compose_answer(question: str, context: dict) -> str:
+    prompt = build_prompt(question, context)
+    try:
+        return generate_answer(prompt)
+    except Exception as e:
+        logger.exception("Answer generation failed: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail="Answer generation failed",
+        )
+
+
+def build_prompt(question: str, context: dict) -> str:
+    return f"""
+You are a helpful assistant that investigates GitHub repositories to answer questions.
+
+Question:
+{question}
+
+Repository context:
+- owner: {context["owner"]}
+- name: {context["name"]}
+- language: {context["language"]}
+- description: {context["description"]}
+- stars: {context["stars"]}
+- readme_available: {context["readme_available"]}
+- readme_preview: {context["readme_preview"]}
+- top_level_files: {context["top_level_files"]}
+- detected_stack: {context["detected_stack"]}
+- default_branch: {context["default_branch"]}
+
+Instructions:
+- Answer using only the repository context above.
+- Be concise and specific.
+- If the context is not enough to answer confidently, say what is missing.
+"""
