@@ -1,6 +1,7 @@
 import base64
 import logging
 import requests
+import os
 
 from fastapi import HTTPException
 from pydantic import HttpUrl
@@ -8,7 +9,8 @@ from pydantic import HttpUrl
 from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
 from app.services.answer_service import compose_answer
 from app.services.llm_provider import select_files
-from app.services.cache_service import get_cached_response,set_cached_response
+from app.services.cache_service import get_cached_response, set_cached_response
+from app.services.vector_cache_service import get_semantic_cache, set_semantic_cache
 
 logger = logging.getLogger(__name__)
 
@@ -17,25 +19,28 @@ NOISE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".lock", ".
 NOISE_FOLDERS = (".git/", ".venv/", "venv/", "node_modules/", "__pycache__/")
 
 
-def _github_get(endpoint: str, ignore_404: bool = False) -> dict| list | None:
+def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
     """Helper to deduplicate GitHub API requests and error handling."""
 
     # check cache first
-    cached=get_cached_response(endpoint)
+    cached = get_cached_response(endpoint)
     if cached is not None:
-        logger.info("CACHE HIT: %s",endpoint)
+        logger.info("CACHE HIT: %s", endpoint)
         return cached
 
     # no cache make the http request
     url = f"{GITHUB_API_BASE}{endpoint}"
 
-    import os
     headers = {}
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-
-    response = requests.get(url, headers=headers, timeout=5)
+        
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.exceptions.ReadTimeout:
+        logger.error(f"GitHub API timed out when fetching {endpoint}")
+        raise HTTPException(status_code=504, detail="GitHub API timed out. The repository might be too large.")
 
     if response.status_code == 404:
         if ignore_404:
@@ -50,13 +55,23 @@ def _github_get(endpoint: str, ignore_404: bool = False) -> dict| list | None:
 
     logger.info("fetched %s successfully --> statuscode:%s", endpoint, response.status_code)
 
-
-    data =response.json()
-    set_cached_response(endpoint,data)
+    data = response.json()
+    set_cached_response(endpoint, data)
     return data
 
 
 def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
+    url_str = str(repo)
+    logger.info("--- Starting Investigation ---")
+    logger.info("Repo: %s", url_str)
+    logger.info("Question: %s", question)
+
+    # 1. True Semantic Caching Check
+    semantic_hit = get_semantic_cache(url_str, question)
+    if semantic_hit:
+        logger.info("Returning instantly from Semantic Cache (ChromaDB)!")
+        return InvestigateResponse(**semantic_hit)
+
     owner, name = parse_gh_url(repo)
 
     payload = fetch_repo_metadata(owner, name)
@@ -92,7 +107,7 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
 
     answer = compose_answer(question, context)
 
-    return InvestigateResponse(
+    final_response = InvestigateResponse(
         repo=repo,
         provider="github",
         owner=owner,
@@ -106,6 +121,12 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
         answer=answer,
         sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list,
     )
+
+    # Save the final response to Vector DB for future queries
+    set_semantic_cache(url_str, question, final_response.model_dump(mode='json'))
+
+    logger.info("--- Investigation Complete ---")
+    return final_response
 
 
 def readme_repo(repo: HttpUrl) -> ReadmeResponse:
