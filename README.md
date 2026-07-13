@@ -4,7 +4,6 @@ Trace is a high-performance, AI-powered investigation tool that allows you to in
 
 ## Key Features
 - **Intelligent File Selection**: Trace doesn't just blindly read code. It fetches the GitHub repository tree, filters out noise (like `node_modules`), and autonomously selects the 5 most relevant files to answer your specific question.
-- **True Semantic Caching (ChromaDB)**: Every question you ask is embedded and mapped to a vector space. If you ask a semantically identical question (even if worded differently), Trace instantly serves the cached answer, saving API tokens and delivering zero-latency results.
 - **Server-Sent Events (SSE) Streaming**: Trace delivers answers byte-by-byte in real-time, providing a premium ChatGPT-like typing experience.
 - **Premium Glassmorphism UI**: Built with vanilla HTML/CSS and JavaScript, the frontend features a dynamic, dark-mode glassmorphic aesthetic with Markdown syntax highlighting.
 
@@ -45,7 +44,6 @@ Trace is a high-performance, AI-powered investigation tool that allows you to in
 
 ## Security
 - **API Keys**: All API keys are loaded securely from your local `.env` file using `python-dotenv`. They are never exposed to the frontend or committed to source control.
-- **Database**: The ChromaDB vector cache is stored locally in the `.chroma/` directory, which is also ignored by Git.
 
 ## Testing
 To run the integration tests (which use `unittest.mock` to prevent actual API calls):

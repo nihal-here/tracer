@@ -11,7 +11,6 @@ from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
 from app.services.answer_service import compose_answer, compose_answer_stream
 from app.services.llm_provider import select_files
 from app.services.cache_service import get_cached_response, set_cached_response
-from app.services.vector_cache_service import get_semantic_cache, set_semantic_cache
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +66,6 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
     logger.info("Repo: %s", url_str)
     logger.info("Question: %s", question)
 
-    # 1. True Semantic Caching Check
-    semantic_hit = get_semantic_cache(url_str, question)
-    if semantic_hit:
-        logger.info("Returning instantly from Semantic Cache (ChromaDB)!")
-        return InvestigateResponse(**semantic_hit)
-
     owner, name = parse_gh_url(repo)
 
     payload = fetch_repo_metadata(owner, name)
@@ -123,8 +116,7 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
         sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list,
     )
 
-    # Save the final response to Vector DB for future queries
-    set_semantic_cache(url_str, question, final_response.model_dump(mode='json'))
+
 
     logger.info("--- Investigation Complete ---")
     return final_response
@@ -135,16 +127,6 @@ def investigate_repo_stream(repo_url: HttpUrl, question: str):
     logger.info("--- Starting Streaming Investigation ---")
     logger.info("Repo: %s", url_str)
     logger.info("Question: %s", question)
-
-    # 1. True Semantic Caching Check
-    semantic_hit = get_semantic_cache(url_str, question)
-    if semantic_hit:
-        logger.info("Returning instantly from Semantic Cache (ChromaDB)!")
-        meta = semantic_hit.copy()
-        full_answer = meta.pop("answer", "")
-        yield f"data: {json.dumps({'metadata': meta})}\n\n"
-        yield f"data: {json.dumps({'chunk': full_answer})}\n\n"
-        return
 
     owner, name = parse_gh_url(repo_url)
 
@@ -195,12 +177,7 @@ def investigate_repo_stream(repo_url: HttpUrl, question: str):
         yield f"data: {json.dumps({'chunk': chunk})}\n\n"
     logger.info("Answer stream completed successfully.")
 
-    # Save the final response to Vector DB for future queries
-    if full_answer and "Answer generation failed" not in full_answer:
-        meta["answer"] = full_answer
-        set_semantic_cache(url_str, question, meta)
-    else:
-        logger.warning("Answer generation failed, skipping cache insertion.")
+
 
     logger.info("--- Streaming Investigation Complete ---")
 

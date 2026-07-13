@@ -6,4 +6,3 @@ redis
 python-dotenv
 pytest
 httpx
-chromadb

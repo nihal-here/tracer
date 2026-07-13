@@ -10,32 +10,24 @@ Trace is a monolithic Python application built on **FastAPI**. It serves a stati
 ## 2. Request Flow
 When a user submits a question via the UI, the following sequence occurs:
 
-1. **Semantic Cache Check**:
-   - The question is hashed and embedded via `vector_cache_service.py` (ChromaDB).
-   - If a cosine similarity search finds a match (distance < 0.2) for the specific repository, the full cached answer is instantly returned via SSE, bypassing all external API calls.
-
-2. **GitHub Data Gathering**:
-   - If there is a cache miss, `investigation_service.py` fetches the repository metadata (stars, description).
+1. **GitHub Data Gathering**:
+   - `investigation_service.py` fetches the repository metadata (stars, description).
    - It fetches the recursive Git tree (`/git/trees/{branch}?recursive=1`).
    - Standard HTTP responses from GitHub are cached in memory via `cache_service.py` to prevent duplicate network requests if the same repo is queried repeatedly.
 
-3. **Intelligent File Selection**:
+2. **Intelligent File Selection**:
    - The massive file tree is filtered to remove noise (e.g., `.venv/`, `node_modules/`).
    - The remaining file paths are sent to Gemini using Structured Outputs (`pydantic` schemas) to strictly select the 5 most relevant files.
    - The backend downloads the raw contents of those 5 specific files.
 
-4. **Streaming the Answer**:
+3. **Streaming the Answer**:
    - The backend constructs a master prompt containing the repository metadata and the exact contents of the selected files.
    - It initiates a `generate_content_stream` call to Gemini.
    - As byte chunks arrive from Google, `investigation_service.py` yields them as Server-Sent Events (`data: {"chunk": "..."}\n\n`).
    - The frontend reads the `ReadableStream` directly from the TCP socket, appending strings and re-rendering Markdown (`marked.js`) in real-time.
 
-5. **Post-Processing**:
-   - Once the stream completes, the fully assembled answer is saved to ChromaDB (`.chroma/` directory) for future semantic caching.
-
 ## 3. Technology Stack
 - **Backend Framework**: FastAPI (Python)
-- **Vector Database**: ChromaDB (SQLite-backed, no Docker required)
 - **AI Integration**: `google-genai` SDK
 - **Frontend**: Vanilla HTML/CSS/JS, `marked.js`, `highlight.js`
 - **Testing**: `pytest`, `unittest.mock`

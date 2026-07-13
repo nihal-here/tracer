@@ -13,11 +13,7 @@ def test_health_endpoint():
 @patch("app.services.investigation_service._github_get")
 @patch("app.services.investigation_service.select_files")
 @patch("app.services.answer_service.generate_answer_stream")
-@patch("app.services.investigation_service.get_semantic_cache")
-@patch("app.services.investigation_service.set_semantic_cache")
-def test_investigate_endpoint(mock_set_cache, mock_get_cache, mock_generate_answer_stream, mock_select_files, mock_github_get):
-    # Mock cache miss by default
-    mock_get_cache.return_value = None
+def test_investigate_endpoint(mock_generate_answer_stream, mock_select_files, mock_github_get):
     # 1. Mock the GitHub API helper responses
     def mock_get(endpoint, ignore_404=False):
         if "readme" in endpoint:
