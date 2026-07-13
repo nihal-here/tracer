@@ -13,7 +13,6 @@ When a user submits a question via the UI, the following sequence occurs:
 1. **GitHub Data Gathering**:
    - `investigation_service.py` fetches the repository metadata (stars, description).
    - It fetches the recursive Git tree (`/git/trees/{branch}?recursive=1`).
-   - Standard HTTP responses from GitHub are cached in memory via `cache_service.py` to prevent duplicate network requests if the same repo is queried repeatedly.
 
 2. **Intelligent File Selection**:
    - The massive file tree is filtered to remove noise (e.g., `.venv/`, `node_modules/`).

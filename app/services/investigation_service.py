@@ -10,7 +10,6 @@ from pydantic import HttpUrl
 from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
 from app.services.answer_service import compose_answer, compose_answer_stream
 from app.services.llm_provider import select_files
-from app.services.cache_service import get_cached_response, set_cached_response
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +19,8 @@ NOISE_FOLDERS = (".git/", ".venv/", "venv/", "node_modules/", "__pycache__/")
 
 
 def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
-    """Helper to deduplicate GitHub API requests and error handling."""
+    """Helper to handle GitHub API requests and error mapping."""
 
-    # check cache first
-    cached = get_cached_response(endpoint)
-    if cached is not None:
-        logger.info("CACHE HIT: %s", endpoint)
-        return cached
-
-    # no cache make the http request
     url = f"{GITHUB_API_BASE}{endpoint}"
 
     headers = {}
@@ -55,9 +47,7 @@ def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
 
     logger.info("fetched %s successfully --> statuscode:%s", endpoint, response.status_code)
 
-    data = response.json()
-    set_cached_response(endpoint, data)
-    return data
+    return response.json()
 
 
 def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:

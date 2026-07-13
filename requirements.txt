@@ -2,7 +2,6 @@ fastapi
 uvicorn
 requests
 google-genai
-redis
 python-dotenv
 pytest
 httpx
