@@ -1,12 +1,15 @@
 import logging
-import json
-from contextlib import contextmanager
+from typing import Iterator
 
-from fastapi import HTTPException
-from pydantic import HttpUrl
-
-from app.models import ContextResponse, InvestigateResponse, ReadmeResponse
-from app.services.answer_service import compose_answer, compose_answer_stream
+from app.models import ContextResponse, ReadmeResponse
+from app.investigation_events import (
+    InvestigationEvent,
+    InvestigationMetadata,
+    InvestigationFilesSelected,
+    InvestigationAnswerChunk,
+    InvestigationCompleted
+)
+from app.services.answer_service import compose_answer_stream
 from app.services.llm_provider import select_files
 from app.services.github import (
     GitHubRepository,
@@ -16,6 +19,9 @@ from app.services.github import (
     GitHubTimeoutError,
     InvalidGitHubURLError
 )
+from pydantic import HttpUrl
+from fastapi import HTTPException
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -40,53 +46,35 @@ def github_error_boundary():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
-    url_str = str(repo)
+def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[InvestigationEvent]:
+    url_str = f"https://github.com/{gh_repo.owner}/{gh_repo.name}"
     logger.info("--- Starting Investigation ---")
     logger.info("Repo: %s", url_str)
     logger.info("Question: %s", question)
 
-    with github_error_boundary():
-        gh_repo = GitHubRepository.from_url(repo)
-        top_level_files = gh_repo.list_top_level_files()
-        readme_text = gh_repo.get_readme()
-        repo_tree = gh_repo.list_files()
+    top_level_files = gh_repo.list_top_level_files()
+    readme_text = gh_repo.get_readme()
+    raw_tree = gh_repo.list_files()
 
     owner = gh_repo.owner
     name = gh_repo.name
     payload = gh_repo.metadata
 
     stars = payload.get("stargazers_count", 0)
-    description_text = payload.get("description") or "No description available"
-    language_text = payload.get("language") or "an unknown language"
+    description_text = payload.get("description", "") or ""
+    language_text = payload.get("language", "") or "Unknown"
     summary = f"{owner}/{name} is a GitHub repository with {stars} stars, written in {language_text}. {description_text}"
     readme_available = readme_text is not None
+    detected_stack = detect_stack(top_level_files)
 
-    clean_tree = filter_noise(repo_tree)
+    clean_tree = filter_noise(raw_tree)
 
     file_list = select_files(question, clean_tree)
 
-    with github_error_boundary():
-        file_contents = gh_repo.read_files(file_list)
+    yield InvestigationFilesSelected(files=file_list)
 
-    context = {
-        "owner": owner,
-        "name": name,
-        "language": language_text,
-        "description": description_text,
-        "stars": stars,
-        "readme_available": readme_available,
-        "readme_preview": truncate_text(readme_text, 500) if readme_text else None,
-        "top_level_files": top_level_files,
-        "detected_stack": detect_stack(top_level_files),
-        "default_branch": gh_repo.default_branch,
-        "file_contents": file_contents,
-    }
-
-    answer = compose_answer(question, context)
-
-    final_response = InvestigateResponse(
-        repo=repo,
+    yield InvestigationMetadata(
+        repo=url_str,
         provider="github",
         owner=owner,
         name=name,
@@ -96,80 +84,38 @@ def investigate_repo(repo: HttpUrl, question: str) -> InvestigateResponse:
         language=language_text,
         summary=summary,
         readme_available=readme_available,
-        answer=answer,
-        sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list,
+        sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list
     )
 
-    logger.info("--- Investigation Complete ---")
-    return final_response
-
-
-def investigate_repo_stream(repo_url: HttpUrl, question: str):
-    url_str = str(repo_url)
-    logger.info("--- Starting Streaming Investigation ---")
-    logger.info("Repo: %s", url_str)
-    logger.info("Question: %s", question)
-
-    with github_error_boundary():
-        gh_repo = GitHubRepository.from_url(repo_url)
-        readme_content = gh_repo.get_readme()
-        top_level_files = gh_repo.list_top_level_files()
-        repo_tree = gh_repo.list_files()
-
-    owner = gh_repo.owner
-    name = gh_repo.name
-    payload = gh_repo.metadata
-
-    file_list = select_files(question, repo_tree)
-
-    with github_error_boundary():
-        file_contents = gh_repo.read_files(file_list)
+    file_contents = gh_repo.read_files(file_list)
 
     context = {
         "owner": owner,
         "name": name,
-        "language": payload.get("language", ""),
-        "description": payload.get("description", ""),
-        "stars": payload.get("stargazers_count", 0),
-        "readme_available": readme_content is not None,
-        "readme_preview": readme_content[:500] if readme_content else "",
+        "language": language_text,
+        "description": description_text,
+        "stars": stars,
+        "readme_available": readme_available,
+        "readme_preview": truncate_text(readme_text, 500) if readme_text else "",
         "top_level_files": ", ".join(top_level_files),
-        "detected_stack": "",
+        "detected_stack": detected_stack,
         "default_branch": gh_repo.default_branch,
         "file_contents": file_contents,
     }
 
-    summary = f"{owner}/{name} is a GitHub repository with {payload.get('stargazers_count', 0)} stars, written in {payload.get('language', 'Unknown')}. {payload.get('description', '')}"
-
-    meta = {
-        "repo": url_str,
-        "provider": "github",
-        "owner": owner,
-        "name": name,
-        "question": question,
-        "description": payload.get("description", ""),
-        "stars": payload.get("stargazers_count", 0),
-        "language": payload.get("language", ""),
-        "summary": summary,
-        "readme_available": readme_content is not None,
-        "sources": ["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list,
-    }
-
-    yield f"data: {json.dumps({'metadata': meta})}\n\n"
-
     logger.info("Generating streamed answer using Gemini...")
-    full_answer = ""
     for chunk in compose_answer_stream(question, context):
-        full_answer += chunk
-        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-    logger.info("Answer stream completed successfully.")
+        yield InvestigationAnswerChunk(chunk=chunk)
 
-    logger.info("--- Streaming Investigation Complete ---")
+    logger.info("Answer stream completed successfully.")
+    yield InvestigationCompleted()
+
+    logger.info("--- Investigation Complete ---")
 
 
 def readme_repo(repo: HttpUrl) -> ReadmeResponse:
     with github_error_boundary():
-        gh_repo = GitHubRepository.from_url(repo)
+        gh_repo = GitHubRepository.from_url(str(repo))
         readme_text = gh_repo.get_readme()
 
     if readme_text:
@@ -180,7 +126,7 @@ def readme_repo(repo: HttpUrl) -> ReadmeResponse:
 
 def context_repo(repo: HttpUrl) -> ContextResponse:
     with github_error_boundary():
-        gh_repo = GitHubRepository.from_url(repo)
+        gh_repo = GitHubRepository.from_url(str(repo))
         top_level_files = gh_repo.list_top_level_files()
         readme_text = gh_repo.get_readme()
 

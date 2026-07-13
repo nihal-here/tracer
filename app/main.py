@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 import logging
+import json
+from dataclasses import asdict
+from typing import Iterator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -9,7 +12,9 @@ logging.basicConfig(
 )
 
 from app.models import HealthResponse, InvestigateRequest, InvestigateResponse, ReadmeResponse, RepoRequest, ContextResponse
-from app.services.investigation_service import investigate_repo, investigate_repo_stream, readme_repo, context_repo
+from app.services.investigation_service import run_investigation, readme_repo, context_repo, github_error_boundary
+from app.services.github import GitHubRepository
+from app.investigation_events import InvestigationEvent, InvestigationMetadata, InvestigationAnswerChunk
 
 app = FastAPI()
 
@@ -19,10 +24,19 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def serve_frontend():
     return FileResponse("static/index.html")
 
+def _sse_adapter(events: Iterator[InvestigationEvent]):
+    for event in events:
+        if isinstance(event, InvestigationMetadata):
+            yield f"data: {json.dumps({'metadata': asdict(event)})}\n\n"
+        elif isinstance(event, InvestigationAnswerChunk):
+            yield f"data: {json.dumps({'chunk': event.chunk})}\n\n"
 
 @app.post("/investigate")
 def investigate(request: InvestigateRequest):
-    return StreamingResponse(investigate_repo_stream(request.repo, request.question), media_type="text/event-stream")
+    with github_error_boundary():
+        gh_repo = GitHubRepository.from_url(str(request.repo))
+
+    return StreamingResponse(_sse_adapter(run_investigation(gh_repo, request.question)), media_type="text/event-stream")
 
 @app.post("/readme", response_model=ReadmeResponse)
 def readme(request: RepoRequest) -> ReadmeResponse:
