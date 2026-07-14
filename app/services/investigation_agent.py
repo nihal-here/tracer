@@ -4,6 +4,7 @@ from pydantic import BaseModel, model_validator
 from google import genai
 from google.genai import types
 from app.services.investigation_workspace import AgentObservation
+from dataclasses import dataclass
 
 class ActionType(str, Enum):
     READ_FILE = "read_file"
@@ -40,7 +41,14 @@ class InvestigationAction(BaseModel):
 
         return self
 
-def choose_next_action(question: str, allowed_paths: frozenset[str], history: list[AgentObservation]) -> InvestigationAction:
+@dataclass(frozen=True)
+class AgentDecisionResult:
+    action: InvestigationAction
+    prompt_chars: int
+    history_chars: int
+    allowed_paths_chars: int
+
+def choose_next_action(question: str, allowed_paths: frozenset[str], history: list[AgentObservation]) -> AgentDecisionResult:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set")
@@ -58,9 +66,14 @@ def choose_next_action(question: str, allowed_paths: frozenset[str], history: li
             lines.append(line)
         history_text = "\n\n".join(lines)
 
+    history_chars = len(history_text)
+
+    allowed_paths_str = ', '.join(allowed_paths)
+    allowed_paths_chars = len(allowed_paths_str)
+
     prompt = (
         f"You are an expert software investigator. You have access to the following repository tree:\n"
-        f"{', '.join(allowed_paths)}\n\n"
+        f"{allowed_paths_str}\n\n"
         f"Question: {question}\n\n"
         f"History of actions taken so far:\n{history_text}\n\n"
         "Choose the next action. You can use:\n"
@@ -82,7 +95,15 @@ def choose_next_action(question: str, allowed_paths: frozenset[str], history: li
     try:
         parsed = response.parsed
         if isinstance(parsed, InvestigationAction):
-            return parsed
-        return InvestigationAction(action_type=ActionType.FINISH)
+            action = parsed
+        else:
+            action = InvestigationAction(action_type=ActionType.FINISH)
     except Exception:
-        return InvestigationAction(action_type=ActionType.FINISH)
+        action = InvestigationAction(action_type=ActionType.FINISH)
+
+    return AgentDecisionResult(
+        action=action,
+        prompt_chars=len(prompt),
+        history_chars=history_chars,
+        allowed_paths_chars=allowed_paths_chars
+    )

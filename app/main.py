@@ -3,6 +3,9 @@ from app.services.investigation_service import run_investigation, readme_repo, c
 from app.services.github import GitHubRepository
 from app.services.repository_snapshot import RepositorySnapshot
 from app.investigation_events import InvestigationEvent, InvestigationMetadata, InvestigationAnswerChunk
+from app.investigation_trace import InvestigationTrace, FailureStage, emit_trace
+import time
+from datetime import datetime, timezone
 
 
 from fastapi import FastAPI
@@ -35,15 +38,38 @@ def _sse_adapter(events: Iterator[InvestigationEvent]):
 
 @app.post("/investigate")
 def investigate(request: InvestigateRequest):
-    with github_error_boundary():
-        gh_repo = GitHubRepository.from_url(str(request.repo))
-        snapshot = RepositorySnapshot(gh_repo)
-        snapshot.materialize()
+    trace = InvestigationTrace(
+        started_at=datetime.now(timezone.utc).isoformat(),
+        question_chars=len(request.question),
+        _start_time=time.perf_counter()
+    )
+
+    try:
+        with github_error_boundary():
+            t_res = time.perf_counter()
+            gh_repo = GitHubRepository.from_url(str(request.repo))
+            trace.repository_resolution_duration_sec = time.perf_counter() - t_res
+
+            snapshot = RepositorySnapshot(gh_repo)
+            t_mat = time.perf_counter()
+            snapshot.materialize()
+            trace.materialization_duration_sec = time.perf_counter() - t_mat
+    except Exception as e:
+        if not trace.failure_stage:
+            # If resolution duration wasn't fully computed, assume it failed during resolution
+            if trace.repository_resolution_duration_sec == 0.0:
+                trace.failure_stage = FailureStage.REPOSITORY_RESOLUTION
+            else:
+                trace.failure_stage = FailureStage.MATERIALIZATION
+        trace.error_type = type(e).__name__
+        emit_trace(trace)
+        raise
 
     def event_generator():
         try:
-            yield from run_investigation(snapshot, request.question)
+            yield from run_investigation(snapshot, request.question, trace)
         finally:
+            emit_trace(trace)
             snapshot.cleanup()
 
     return StreamingResponse(_sse_adapter(event_generator()), media_type="text/event-stream")

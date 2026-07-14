@@ -71,6 +71,7 @@ def test_workspace_max_file_chars_truncation(tmp_path):
 
     obs = workspace.read_file("valid.py")
     assert obs.result_status == "success"
+    assert obs.content is not None
     assert len(obs.content) < len(long_content)
     assert "[Truncated]" in obs.content
 
@@ -82,6 +83,7 @@ def test_workspace_max_total_evidence_chars(tmp_path):
     workspace.total_evidence_chars = InvestigationWorkspace.MAX_TOTAL_EVIDENCE_CHARS - 10
 
     obs = workspace.read_file("f1.py")
+    assert obs.content is not None
     assert "1234567890" in obs.content
 
 def test_search_code_literal(tmp_path):
@@ -91,6 +93,7 @@ def test_search_code_literal(tmp_path):
 
     obs = workspace.search_code("foo")
     assert obs.result_status == "success"
+    assert obs.content is not None
     assert "main.py:1: def foo():" in obs.content
     assert obs.new_evidence_added is True
 
@@ -100,6 +103,7 @@ def test_search_code_limits(tmp_path):
     workspace = InvestigationWorkspace(snapshot, allowed_paths=["main.py"])
 
     obs = workspace.search_code("foo")
+    assert obs.content is not None
     assert "Scanning halted due to budget exhaustion" in obs.content
     assert obs.content.count("main.py:") == InvestigationWorkspace.MAX_SEARCH_RESULTS
 
@@ -113,6 +117,7 @@ def test_search_code_budget_exhausts_mid_line(tmp_path):
     workspace = SmallBudgetWorkspace(snapshot, allowed_paths=["long_line.txt"])
     obs = workspace.search_code("find_me")
 
+    assert obs.content is not None
     assert "No matches found." in obs.content
     assert "Scanning halted due to budget exhaustion" in obs.content
     assert workspace.total_searches == 1

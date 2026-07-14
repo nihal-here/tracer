@@ -9,8 +9,16 @@ from app.investigation_events import (
     InvestigationAnswerChunk,
     InvestigationCompleted
 )
-from app.services.answer_service import compose_answer_stream
+from app.services.answer_service import prepare_answer_stream
 from app.services.investigation_workspace import InvestigationWorkspace
+from app.investigation_trace import (
+    InvestigationTrace,
+    AgentStepTrace,
+    FailureStage,
+    TerminationReason,
+    bound_trace_string
+)
+import time
 from app.services.repository_snapshot import RepositorySnapshot
 from app.services.investigation_agent import choose_next_action, ActionType
 from app.services.github import (
@@ -57,7 +65,7 @@ def github_error_boundary():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def run_investigation(snapshot: RepositorySnapshot, question: str) -> Iterator[InvestigationEvent]:
+def run_investigation(snapshot: RepositorySnapshot, question: str, trace: InvestigationTrace) -> Iterator[InvestigationEvent]:
     gh_repo = snapshot.gh_repo
     url_str = f"https://github.com/{gh_repo.owner}/{gh_repo.name}"
     logger.info("--- Starting Investigation ---")
@@ -96,22 +104,61 @@ def run_investigation(snapshot: RepositorySnapshot, question: str) -> Iterator[I
         sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + list(workspace.allowed_paths)
     )
 
-    while workspace.can_continue():
-        action = choose_next_action(question, workspace.allowed_paths, workspace.history)
-        workspace.record_iteration()
+    try:
+        while workspace.can_continue():
+            t_start = time.perf_counter()
+            decision_result = choose_next_action(question, workspace.allowed_paths, workspace.history)
+            action = decision_result.action
+            decision_duration = time.perf_counter() - t_start
 
-        if action.action_type == ActionType.FINISH:
-            break
+            workspace.record_iteration()
 
-        elif action.action_type == ActionType.READ_FILE:
-            observation = workspace.read_file(action.file_path)
+            step_trace = AgentStepTrace(
+                iteration=workspace.iterations,
+                decision_duration_sec=decision_duration,
+                action_chosen=action.action_type,
+                action_arguments={},
+                prompt_chars=decision_result.prompt_chars,
+                history_chars=decision_result.history_chars,
+                allowed_paths_chars=decision_result.allowed_paths_chars,
+                execution_duration_sec=0.0
+            )
 
-            if observation.new_evidence_added:
-                assert observation.path is not None
-                yield InvestigationFileRead(path=observation.path, chars_read=len(observation.content or ""), cached=False)
+            if action.action_type == ActionType.FINISH:
+                trace.termination_reason = TerminationReason.MODEL_FINISHED
+                trace.steps.append(step_trace)
+                break
 
-        elif action.action_type == ActionType.SEARCH_CODE:
-            observation = workspace.search_code(action.search_query, action.case_sensitive)
+            elif action.action_type == ActionType.READ_FILE:
+                step_trace.action_arguments["file_path"] = bound_trace_string(action.file_path)
+
+                t_exec_start = time.perf_counter()
+                observation = workspace.read_file(action.file_path)
+                step_trace.execution_duration_sec = time.perf_counter() - t_exec_start
+
+                if observation.new_evidence_added:
+                    assert observation.path is not None
+                    yield InvestigationFileRead(path=observation.path, chars_read=len(observation.content or ""), cached=False)
+
+            elif action.action_type == ActionType.SEARCH_CODE:
+                step_trace.action_arguments["search_query_chars"] = str(len(action.search_query)) if action.search_query else "0"
+                step_trace.action_arguments["case_sensitive"] = str(action.case_sensitive)
+
+                t_exec_start = time.perf_counter()
+                observation = workspace.search_code(action.search_query, action.case_sensitive)
+                step_trace.execution_duration_sec = time.perf_counter() - t_exec_start
+                # You could extract search_results_count from observation.content if needed, but we'll leave it simple
+
+            trace.steps.append(step_trace)
+
+        if trace.termination_reason is None:
+            trace.termination_reason = workspace.get_termination_reason()
+
+    except Exception as e:
+        if not trace.failure_stage:
+            trace.failure_stage = FailureStage.AGENT_DECISION
+        trace.error_type = type(e).__name__
+        raise
 
     context = {
         "owner": owner,
@@ -127,9 +174,24 @@ def run_investigation(snapshot: RepositorySnapshot, question: str) -> Iterator[I
         "file_contents": workspace.gathered_evidence,
     }
 
+    trace.final_evidence_files_count = len(workspace.gathered_evidence)
+    trace.final_evidence_chars = workspace.total_evidence_chars
+
     logger.info("Generating streamed answer using Gemini...")
-    for chunk in compose_answer_stream(question, context):
-        yield InvestigationAnswerChunk(chunk=chunk)
+    ans_res = prepare_answer_stream(question, context)
+    trace.final_prompt_chars = ans_res.prompt_chars
+
+    start_ans_time = time.perf_counter()
+    try:
+        for chunk in ans_res.chunk_generator:
+            trace.answer_chunks_emitted += 1
+            yield InvestigationAnswerChunk(chunk=chunk)
+    except Exception as e:
+        trace.failure_stage = FailureStage.ANSWER_GENERATION
+        trace.error_type = type(e).__name__
+        raise
+    finally:
+        trace.answer_generation_duration_sec = time.perf_counter() - start_ans_time
 
     logger.info("Answer stream completed successfully.")
     yield InvestigationCompleted()

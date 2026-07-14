@@ -1,12 +1,25 @@
 from app.services.llm_provider import generate_answer_stream
+from dataclasses import dataclass
+from typing import Iterator, Any
 
+@dataclass
+class AnswerGeneratorResult:
+    prompt_chars: int
+    chunk_generator: Iterator[str]
 
-def compose_answer_stream(question: str, context: dict):
+def prepare_answer_stream(question: str, context: dict[str, Any]) -> AnswerGeneratorResult:
+    prompt = build_prompt(question, context)
+    return AnswerGeneratorResult(
+        prompt_chars=len(prompt),
+        chunk_generator=generate_answer_stream(prompt)
+    )
+
+def compose_answer_stream(question: str, context: dict[str, Any]):
     prompt = build_prompt(question, context)
     yield from generate_answer_stream(prompt)
 
 
-def build_prompt(question: str, context: dict) -> str:
+def build_prompt(question: str, context: dict[str, Any]) -> str:
     # Build a string of the specific file contents we gathered
     files_context = ""
     file_contents = context.get("file_contents", {})

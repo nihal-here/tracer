@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional
 from app.services.repository_snapshot import RepositorySnapshot
 import re
+import app.investigation_trace as trace_models
 
 @dataclass
 class AgentObservation:
@@ -60,6 +61,19 @@ class InvestigationWorkspace:
         if self.total_evidence_chars >= self.MAX_TOTAL_EVIDENCE_CHARS:
             return False
         return True
+
+    def get_termination_reason(self) -> 'trace_models.TerminationReason | None':
+        if self.iterations >= self.MAX_ITERATIONS:
+            return trace_models.TerminationReason.MAX_ITERATIONS
+        if self.invalid_actions >= self.MAX_INVALID_ACTIONS:
+            return trace_models.TerminationReason.MAX_INVALID_ACTIONS
+        if self.consecutive_no_progress >= self.MAX_CONSECUTIVE_NO_PROGRESS:
+            return trace_models.TerminationReason.CONSECUTIVE_NO_PROGRESS
+        if len(self.gathered_evidence) >= self.MAX_UNIQUE_FILES:
+            return trace_models.TerminationReason.MAX_UNIQUE_FILES
+        if self.total_evidence_chars >= self.MAX_TOTAL_EVIDENCE_CHARS:
+            return trace_models.TerminationReason.MAX_EVIDENCE_CHARS
+        return None
 
     def record_iteration(self):
         self.iterations += 1

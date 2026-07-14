@@ -14,7 +14,7 @@ def test_health_endpoint():
 @patch("app.main.GitHubRepository.from_url")
 @patch("app.main.RepositorySnapshot")
 @patch("app.services.investigation_service.choose_next_action")
-@patch("app.services.investigation_service.compose_answer_stream")
+@patch("app.services.investigation_service.prepare_answer_stream")
 def test_investigate_endpoint(mock_compose, mock_choose, mock_snapshot_cls, mock_from_url):
     mock_repo = MagicMock()
     mock_repo.owner = "test-owner"
@@ -46,13 +46,17 @@ def test_investigate_endpoint(mock_compose, mock_choose, mock_snapshot_cls, mock
         mock_snapshot.extracted_files = frozenset(["README.md", "main.py"])
         mock_snapshot_cls.return_value = mock_snapshot
 
-        from app.services.investigation_agent import InvestigationAction, ActionType
+        from app.services.investigation_agent import InvestigationAction, ActionType, AgentDecisionResult
         mock_choose.side_effect = [
-            InvestigationAction(action_type=ActionType.READ_FILE, file_path="main.py"),
-            InvestigationAction(action_type=ActionType.FINISH)
+            AgentDecisionResult(action=InvestigationAction(action_type=ActionType.READ_FILE, file_path="main.py"), prompt_chars=100, history_chars=10, allowed_paths_chars=5),
+            AgentDecisionResult(action=InvestigationAction(action_type=ActionType.FINISH), prompt_chars=100, history_chars=10, allowed_paths_chars=5)
         ]
 
-        mock_compose.return_value = iter(["This is a ", "mocked answer ", "based on the repo."])
+        from app.services.answer_service import AnswerGeneratorResult
+        mock_compose.return_value = AnswerGeneratorResult(
+            prompt_chars=500,
+            chunk_generator=iter(["This is a ", "mocked answer ", "based on the repo."])
+        )
 
         payload = {
             "repo": "https://github.com/test-owner/test-repo",
@@ -104,7 +108,7 @@ def test_investigate_endpoint_eager_error(mock_from_url):
 @patch("app.main.GitHubRepository.from_url")
 @patch("app.main.RepositorySnapshot")
 @patch("app.services.investigation_service.choose_next_action")
-@patch("app.services.investigation_service.compose_answer_stream")
+@patch("app.services.investigation_service.prepare_answer_stream")
 def test_investigate_endpoint_mid_stream_failure(mock_compose, mock_choose, mock_snapshot_cls, mock_from_url):
     mock_repo = MagicMock()
     mock_repo.owner = "test-owner"
@@ -119,14 +123,18 @@ def test_investigate_endpoint_mid_stream_failure(mock_compose, mock_choose, mock
     mock_snapshot.extracted_files = frozenset()
     mock_snapshot_cls.return_value = mock_snapshot
 
-    from app.services.investigation_agent import InvestigationAction, ActionType
-    mock_choose.return_value = InvestigationAction(action_type=ActionType.FINISH)
+    from app.services.investigation_agent import InvestigationAction, ActionType, AgentDecisionResult
+    mock_choose.return_value = AgentDecisionResult(action=InvestigationAction(action_type=ActionType.FINISH), prompt_chars=100, history_chars=10, allowed_paths_chars=5)
 
     def failing_stream(*args, **kwargs):
         yield "Starting answer..."
         raise RuntimeError("Mid-stream LLM failure")
 
-    mock_compose.side_effect = failing_stream
+    from app.services.answer_service import AnswerGeneratorResult
+    mock_compose.return_value = AnswerGeneratorResult(
+        prompt_chars=500,
+        chunk_generator=failing_stream()
+    )
 
     payload = {
         "repo": "https://github.com/test/repo",

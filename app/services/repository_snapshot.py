@@ -26,7 +26,7 @@ CHUNK_SIZE = 64 * 1024
 class RepositorySnapshot:
     def __init__(self, gh_repo: GitHubRepository):
         self.gh_repo = gh_repo
-        self.temp_dir: tempfile.TemporaryDirectory | None = None
+        self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self.root_path: Path | None = None
         self.extracted_files: frozenset[str] = frozenset()
 

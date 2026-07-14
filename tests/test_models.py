@@ -15,6 +15,6 @@ def test_investigate_request_invalid_url():
     # Invalid URL format (Pydantic validation should fail)
     with pytest.raises(ValidationError):
         InvestigateRequest(
-            repo="not-a-url",
+            repo="not-a-url", # pyright: ignore
             question="What does this do?"
         )

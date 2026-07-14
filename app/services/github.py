@@ -4,6 +4,7 @@ import base64
 import binascii
 import requests
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class RepositorySnapshotError(GitHubError):
     pass
 
 
-def check_github_response(response: requests.Response, endpoint: str = "", ignore_404: bool = False):
+def check_github_response(response: requests.Response, endpoint: str = "", ignore_404: bool = False) -> dict[str, Any] | list[Any] | None:
     """Shared HTTP response checker for GitHub API and archive requests."""
     if response.status_code == 404:
         if ignore_404:
@@ -55,7 +56,10 @@ def check_github_response(response: requests.Response, endpoint: str = "", ignor
 
     if response.status_code != 200:
         raise GitHubAPIError(f"GitHub API request failed for {endpoint} with status {response.status_code}")
-def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
+
+    return response.json()
+
+def _github_get(endpoint: str, ignore_404: bool = False) -> dict[str, Any] | list[Any] | None:
     url = f"{GITHUB_API_BASE}{endpoint}"
     headers = {}
     token = os.environ.get("GITHUB_TOKEN")
@@ -71,12 +75,7 @@ def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
         logger.error(f"GitHub API request failed when fetching {endpoint}: {e}")
         raise GitHubAPIError(f"GitHub API request failed: {e}")
 
-    result = check_github_response(response, endpoint, ignore_404)
-    # check_github_response returns None if ignore_404 and status_code == 404
-    if response.status_code == 404 and ignore_404:
-        return None
-
-    return response.json()
+    return check_github_response(response, endpoint, ignore_404)
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,7 @@ class GitHubRepository:
     name: str
     revision: str
     default_branch: str
-    metadata: dict
+    metadata: dict[str, Any]
 
     @classmethod
     def from_url(cls, repo_url: str) -> "GitHubRepository":

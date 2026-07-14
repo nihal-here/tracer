@@ -19,9 +19,8 @@ def test_choose_next_action_history_serialization(mock_client_class):
         AgentObservation(action_type="read_file", path="bad.py", result_status="invalid_path", content=None, new_evidence_added=False)
     ]
 
-    action = choose_next_action("Q?", frozenset(["valid.py"]), history)
-    
-    assert action.action_type == ActionType.FINISH
+    result = choose_next_action("Q?", frozenset(["valid.py"]), history)
+    assert result.action.action_type == ActionType.FINISH
     
     # Verify exactly what was sent in the prompt
     prompt_sent = mock_client.models.generate_content.call_args[1]["contents"]
