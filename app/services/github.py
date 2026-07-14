@@ -29,7 +29,32 @@ class InvalidGitHubURLError(GitHubError):
 class GitHubAPIError(GitHubError):
     pass
 
+class RepositoryArchiveTooLargeError(GitHubError):
+    pass
 
+class RepositoryArchiveUnsafeError(GitHubError):
+    pass
+
+class RepositorySnapshotError(GitHubError):
+    pass
+
+
+def check_github_response(response: requests.Response, endpoint: str = "", ignore_404: bool = False):
+    """Shared HTTP response checker for GitHub API and archive requests."""
+    if response.status_code == 404:
+        if ignore_404:
+            return None
+        raise GitHubResourceNotFoundError(f"Not found: {endpoint}")
+
+    if response.status_code == 403:
+        if "X-RateLimit-Remaining" in response.headers and response.headers["X-RateLimit-Remaining"] == "0":
+            raise GitHubRateLimitError("GitHub API rate limit exceeded! Please add a GITHUB_TOKEN to your .env file.")
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded! Please add a GITHUB_TOKEN to your .env file.")
+        raise GitHubAPIError(f"GitHub API request forbidden: {endpoint}")
+
+    if response.status_code != 200:
+        raise GitHubAPIError(f"GitHub API request failed for {endpoint} with status {response.status_code}")
 def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
     url = f"{GITHUB_API_BASE}{endpoint}"
     headers = {}
@@ -46,20 +71,10 @@ def _github_get(endpoint: str, ignore_404: bool = False) -> dict | list | None:
         logger.error(f"GitHub API request failed when fetching {endpoint}: {e}")
         raise GitHubAPIError(f"GitHub API request failed: {e}")
 
-    if response.status_code == 404:
-        if ignore_404:
-            return None
-        raise GitHubResourceNotFoundError(f"Not found: {endpoint}")
-
-    if response.status_code == 403:
-        if "X-RateLimit-Remaining" in response.headers and response.headers["X-RateLimit-Remaining"] == "0":
-            raise GitHubRateLimitError("GitHub API rate limit exceeded! Please add a GITHUB_TOKEN to your .env file.")
-        if "rate limit" in response.text.lower():
-            raise GitHubRateLimitError("GitHub API rate limit exceeded! Please add a GITHUB_TOKEN to your .env file.")
-        raise GitHubAPIError(f"GitHub API request forbidden: {endpoint}")
-
-    if response.status_code != 200:
-        raise GitHubAPIError(f"GitHub API request failed for {endpoint} with status {response.status_code}")
+    result = check_github_response(response, endpoint, ignore_404)
+    # check_github_response returns None if ignore_404 and status_code == 404
+    if response.status_code == 404 and ignore_404:
+        return None
 
     return response.json()
 
@@ -126,7 +141,7 @@ class GitHubRepository:
         if not content:
             return None
         try:
-            return base64.b64decode(content, validate=True).decode("utf-8")
+            return base64.b64decode(content).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError, ValueError) as e:
             raise GitHubAPIError(f"Failed to decode README content: {e}")
 
@@ -144,19 +159,3 @@ class GitHubRepository:
         if not isinstance(response, list):
             return []
         return [item["name"] for item in response if "name" in item]
-
-    def read_files(self, file_paths: list[str]) -> dict[str, str]:
-        file_contents = {}
-        for path in file_paths:
-            response = _github_get(f"/{self.owner}/{self.name}/contents/{path}?ref={self.revision}", ignore_404=True)
-            if not isinstance(response, dict):
-                continue
-            content = response.get("content")
-            if isinstance(content, str):
-                try:
-                    file_contents[path] = base64.b64decode(content, validate=True).decode("utf-8")
-                except (binascii.Error, UnicodeDecodeError, ValueError) as e:
-                    raise GitHubAPIError(f"Failed to decode file content for {path}: {e}")
-            else:
-                file_contents[path] = ""
-        return file_contents

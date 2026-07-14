@@ -7,18 +7,37 @@ from app.services.investigation_workspace import AgentObservation
 
 class ActionType(str, Enum):
     READ_FILE = "read_file"
+    SEARCH_CODE = "search_code"
     FINISH = "finish"
 
 class InvestigationAction(BaseModel):
     action_type: ActionType
     file_path: str | None = None
-    
+    search_query: str | None = None
+    case_sensitive: bool = False
+
     @model_validator(mode="after")
     def validate_action(self):
-        if self.action_type == ActionType.READ_FILE and not self.file_path:
-            raise ValueError("READ_FILE requires file_path.")
-        if self.action_type == ActionType.FINISH and self.file_path is not None:
-            raise ValueError("FINISH must not contain file_path.")
+        if self.action_type == ActionType.READ_FILE:
+            if not self.file_path:
+                raise ValueError("READ_FILE requires file_path.")
+            if self.search_query is not None:
+                raise ValueError("READ_FILE must not contain search_query.")
+            if self.case_sensitive:
+                raise ValueError("READ_FILE must not have case_sensitive=True.")
+
+        elif self.action_type == ActionType.SEARCH_CODE:
+            if not self.search_query:
+                raise ValueError("SEARCH_CODE requires search_query.")
+            if self.file_path is not None:
+                raise ValueError("SEARCH_CODE must not contain file_path.")
+
+        elif self.action_type == ActionType.FINISH:
+            if self.file_path is not None or self.search_query is not None:
+                raise ValueError("FINISH must not contain file_path or search_query.")
+            if self.case_sensitive:
+                raise ValueError("FINISH must not have case_sensitive=True.")
+
         return self
 
 def choose_next_action(question: str, allowed_paths: frozenset[str], history: list[AgentObservation]) -> InvestigationAction:
@@ -44,8 +63,10 @@ def choose_next_action(question: str, allowed_paths: frozenset[str], history: li
         f"{', '.join(allowed_paths)}\n\n"
         f"Question: {question}\n\n"
         f"History of actions taken so far:\n{history_text}\n\n"
-        "Choose the next action. If you need more evidence, use 'read_file' and provide a valid 'file_path' from the tree. "
-        "If you have enough evidence to answer the question confidently, or if you cannot proceed further, use 'finish'."
+        "Choose the next action. You can use:\n"
+        "1. 'search_code' to find literal substrings (e.g. function names or keywords) across all files. Provide 'search_query' and optionally 'case_sensitive'.\n"
+        "2. 'read_file' to fetch a complete file if you know the exact path from the tree or search results. Provide 'file_path'.\n"
+        "3. 'finish' if you have enough evidence to answer the question confidently, or if you cannot proceed further."
     )
 
     response = client.models.generate_content(

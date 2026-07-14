@@ -1,3 +1,10 @@
+from app.models import HealthResponse, InvestigateRequest, ReadmeResponse, RepoRequest, ContextResponse
+from app.services.investigation_service import run_investigation, readme_repo, context_repo, github_error_boundary
+from app.services.github import GitHubRepository
+from app.services.repository_snapshot import RepositorySnapshot
+from app.investigation_events import InvestigationEvent, InvestigationMetadata, InvestigationAnswerChunk
+
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -10,11 +17,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
-from app.models import HealthResponse, InvestigateRequest, InvestigateResponse, ReadmeResponse, RepoRequest, ContextResponse
-from app.services.investigation_service import run_investigation, readme_repo, context_repo, github_error_boundary
-from app.services.github import GitHubRepository
-from app.investigation_events import InvestigationEvent, InvestigationMetadata, InvestigationAnswerChunk
 
 app = FastAPI()
 
@@ -35,8 +37,16 @@ def _sse_adapter(events: Iterator[InvestigationEvent]):
 def investigate(request: InvestigateRequest):
     with github_error_boundary():
         gh_repo = GitHubRepository.from_url(str(request.repo))
+        snapshot = RepositorySnapshot(gh_repo)
+        snapshot.materialize()
 
-    return StreamingResponse(_sse_adapter(run_investigation(gh_repo, request.question)), media_type="text/event-stream")
+    def event_generator():
+        try:
+            yield from run_investigation(snapshot, request.question)
+        finally:
+            snapshot.cleanup()
+
+    return StreamingResponse(_sse_adapter(event_generator()), media_type="text/event-stream")
 
 @app.post("/readme", response_model=ReadmeResponse)
 def readme(request: RepoRequest) -> ReadmeResponse:

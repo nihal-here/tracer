@@ -11,6 +11,7 @@ from app.investigation_events import (
 )
 from app.services.answer_service import compose_answer_stream
 from app.services.investigation_workspace import InvestigationWorkspace
+from app.services.repository_snapshot import RepositorySnapshot
 from app.services.investigation_agent import choose_next_action, ActionType
 from app.services.github import (
     GitHubRepository,
@@ -18,7 +19,10 @@ from app.services.github import (
     GitHubResourceNotFoundError,
     GitHubRateLimitError,
     GitHubTimeoutError,
-    InvalidGitHubURLError
+    InvalidGitHubURLError,
+    RepositoryArchiveTooLargeError,
+    RepositoryArchiveUnsafeError,
+    RepositorySnapshotError
 )
 from pydantic import HttpUrl
 from fastapi import HTTPException
@@ -37,6 +41,12 @@ def github_error_boundary():
         yield
     except InvalidGitHubURLError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RepositoryArchiveUnsafeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RepositoryArchiveTooLargeError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except RepositorySnapshotError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except GitHubResourceNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except GitHubRateLimitError as e:
@@ -47,7 +57,8 @@ def github_error_boundary():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[InvestigationEvent]:
+def run_investigation(snapshot: RepositorySnapshot, question: str) -> Iterator[InvestigationEvent]:
+    gh_repo = snapshot.gh_repo
     url_str = f"https://github.com/{gh_repo.owner}/{gh_repo.name}"
     logger.info("--- Starting Investigation ---")
     logger.info("Repo: %s", url_str)
@@ -55,7 +66,7 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
 
     top_level_files = gh_repo.list_top_level_files()
     readme_text = gh_repo.get_readme()
-    raw_tree = gh_repo.list_files()
+    raw_tree = list(snapshot.extracted_files)
 
     owner = gh_repo.owner
     name = gh_repo.name
@@ -69,7 +80,7 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
     detected_stack = detect_stack(top_level_files)
 
     clean_tree = filter_noise(raw_tree)
-    workspace = InvestigationWorkspace(gh_repo, clean_tree)
+    workspace = InvestigationWorkspace(snapshot, clean_tree)
 
     yield InvestigationMetadata(
         repo=url_str,
@@ -96,7 +107,11 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
             observation = workspace.read_file(action.file_path)
 
             if observation.new_evidence_added:
+                assert observation.path is not None
                 yield InvestigationFileRead(path=observation.path, chars_read=len(observation.content or ""), cached=False)
+
+        elif action.action_type == ActionType.SEARCH_CODE:
+            observation = workspace.search_code(action.search_query, action.case_sensitive)
 
     context = {
         "owner": owner,
