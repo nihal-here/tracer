@@ -79,7 +79,13 @@ def choose_next_action(question: str, allowed_paths: frozenset[str], history: li
         "Choose the next action. You can use:\n"
         "1. 'search_code' to find literal substrings (e.g. function names or keywords) across all files. Provide 'search_query' and optionally 'case_sensitive'.\n"
         "2. 'read_file' to fetch a complete file if you know the exact path from the tree or search results. Provide 'file_path'.\n"
-        "3. 'finish' if you have enough evidence to answer the question confidently, or if you cannot proceed further."
+        "3. 'finish' to end the investigation. Rules for FINISH:\n"
+        "   - Identify the distinct mechanisms explicitly requested by the user's question.\n"
+        "   - Ensure each major requested mechanism is directly supported by gathered evidence.\n"
+        "   - If gathered evidence delegates an important requested mechanism to another symbol, strategy, or abstraction, follow that dependency.\n"
+        "   - Do not FINISH merely because a plausible answer can be inferred from names or abstractions.\n"
+        "   - FINISH only when the major requested claims are directly evidenced, or when budgets prevent further work.\n"
+        "   - Avoid exhaustive dependency traversal; only follow delegated behavior material to the user's actual question."
     )
 
     response = client.models.generate_content(
