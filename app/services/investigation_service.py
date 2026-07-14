@@ -5,12 +5,13 @@ from app.models import ContextResponse, ReadmeResponse
 from app.investigation_events import (
     InvestigationEvent,
     InvestigationMetadata,
-    InvestigationFilesSelected,
+    InvestigationFileRead,
     InvestigationAnswerChunk,
     InvestigationCompleted
 )
 from app.services.answer_service import compose_answer_stream
-from app.services.llm_provider import select_files
+from app.services.investigation_workspace import InvestigationWorkspace
+from app.services.investigation_agent import choose_next_action, ActionType
 from app.services.github import (
     GitHubRepository,
     GitHubError,
@@ -68,10 +69,7 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
     detected_stack = detect_stack(top_level_files)
 
     clean_tree = filter_noise(raw_tree)
-
-    file_list = select_files(question, clean_tree)
-
-    yield InvestigationFilesSelected(files=file_list)
+    workspace = InvestigationWorkspace(gh_repo, clean_tree)
 
     yield InvestigationMetadata(
         repo=url_str,
@@ -84,10 +82,21 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
         language=language_text,
         summary=summary,
         readme_available=readme_available,
-        sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + file_list
+        sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + list(workspace.allowed_paths)
     )
 
-    file_contents = gh_repo.read_files(file_list)
+    while workspace.can_continue():
+        action = choose_next_action(question, workspace.allowed_paths, workspace.history)
+        workspace.record_iteration()
+
+        if action.action_type == ActionType.FINISH:
+            break
+
+        elif action.action_type == ActionType.READ_FILE:
+            observation = workspace.read_file(action.file_path)
+
+            if observation.new_evidence_added:
+                yield InvestigationFileRead(path=observation.path, chars_read=len(observation.content or ""), cached=False)
 
     context = {
         "owner": owner,
@@ -100,7 +109,7 @@ def run_investigation(gh_repo: GitHubRepository, question: str) -> Iterator[Inve
         "top_level_files": ", ".join(top_level_files),
         "detected_stack": detected_stack,
         "default_branch": gh_repo.default_branch,
-        "file_contents": file_contents,
+        "file_contents": workspace.gathered_evidence,
     }
 
     logger.info("Generating streamed answer using Gemini...")

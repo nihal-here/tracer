@@ -18,8 +18,10 @@ class InvestigationMetadata:
 
 
 @dataclass(frozen=True)
-class InvestigationFilesSelected:
-    files: list[str]
+class InvestigationFileRead:
+    path: str
+    chars_read: int
+    cached: bool
 
 
 @dataclass(frozen=True)
@@ -34,7 +36,7 @@ class InvestigationCompleted:
 
 InvestigationEvent = Union[
     InvestigationMetadata,
-    InvestigationFilesSelected,
+    InvestigationFileRead,
     InvestigationAnswerChunk,
     InvestigationCompleted
 ]
