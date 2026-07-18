@@ -1,11 +1,11 @@
 import logging
-from typing import Iterator, AsyncIterator
+import time
+from typing import AsyncIterator
 
 from app.models import ContextResponse, ReadmeResponse
 from app.investigation_events import (
     InvestigationEvent,
     InvestigationMetadata,
-    InvestigationFileRead,
     InvestigationAnswerChunk,
     InvestigationCompleted
 )
@@ -14,14 +14,14 @@ from app.services.investigation_workspace import InvestigationWorkspace
 from app.services.repo_map import build_repo_map
 from app.investigation_trace import (
     InvestigationTrace,
-    AgentStepTrace,
     FailureStage,
     TerminationReason,
-    bound_trace_string
 )
-import time
 from app.services.repository_snapshot import RepositorySnapshot
 from app.services.investigation_agent import investigation_agent, AgentDeps, DomainTerminationException
+from app.services.investigation_agent import INVESTIGATION_MODEL
+from app.services.investigation_cache import InvestigationCache, InvestigationCacheKey, normalize_question
+from app.investigation_trace import record_model_request_usage
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from app.services.github import (
     GitHubRepository,
@@ -74,8 +74,10 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
     logger.info("Repo: %s", url_str)
     logger.info("Question: %s", question)
 
-    top_level_files = gh_repo.list_top_level_files()
-    readme_text = gh_repo.get_readme()
+    # The archive is already materialized locally. These values are equivalent
+    # for investigation purposes and avoid two additional GitHub calls.
+    top_level_files = snapshot.list_top_level_files()
+    readme_text = snapshot.get_readme()
     raw_tree = list(snapshot.extracted_files)
 
     owner = gh_repo.owner
@@ -95,6 +97,19 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
     # Build the hierarchical repository map once before the investigation loop.
     repo_map = build_repo_map(workspace.allowed_paths)
 
+    cache_key = InvestigationCacheKey(
+        provider="github",
+        owner=owner,
+        name=name,
+        revision=gh_repo.revision,
+        question=normalize_question(question),
+        model=INVESTIGATION_MODEL,
+    )
+    investigation_cache = InvestigationCache()
+    cache_lookup_started = time.perf_counter()
+    cached_investigation = investigation_cache.get(cache_key)
+    trace.investigation_cache_lookup_duration_sec = time.perf_counter() - cache_lookup_started
+
     yield InvestigationMetadata(
         repo=url_str,
         provider="github",
@@ -109,37 +124,83 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
         sources=["github_metadata", "github_readme_presence", "github_repo_contents"] + list(workspace.allowed_paths)
     )
 
-    try:
-        deps = AgentDeps(workspace=workspace, trace=trace)
-        prompt = f"Repository map:\n{repo_map}\n\nQuestion: {question}"
-
+    result = None
+    if cached_investigation is not None:
         try:
-            from pydantic_ai.usage import UsageLimits
-            MAX_MODEL_REQUESTS = 20
-            result = await investigation_agent.run(
-                prompt,
-                deps=deps,
-                usage_limits=UsageLimits(request_limit=MAX_MODEL_REQUESTS)
-            )
-            trace.termination_reason = TerminationReason.MODEL_FINISHED
-            usage = result.usage
-            trace.model_requests = usage.requests
-            trace.input_tokens = usage.input_tokens
-            trace.output_tokens = usage.output_tokens
-            
-        except DomainTerminationException as e:
-            trace.termination_reason = TerminationReason(e.reason)
-        except UnexpectedModelBehavior:
-            trace.termination_reason = TerminationReason.MAX_ACTIONS
+            evidence = cached_investigation["gathered_evidence"]
+            if (
+                all(isinstance(path, str) and path in workspace.allowed_paths for path in evidence)
+                and len(evidence) <= workspace.MAX_UNIQUE_FILES
+                and sum(len(content) for content in evidence.values() if isinstance(content, str)) <= workspace.MAX_TOTAL_EVIDENCE_CHARS
+                and all(isinstance(content, str) for content in evidence.values())
+            ):
+                workspace.gathered_evidence = dict(evidence)
+                workspace.total_evidence_chars = sum(len(content) for content in evidence.values())
+                trace.investigation_cache_hit = True
+                trace.termination_reason = TerminationReason.MODEL_FINISHED
+                trace.cached_investigation_tool_sequence = list(cached_investigation.get("tool_sequence", []))
+            else:
+                cached_investigation = None
+        except (TypeError, ValueError):
+            cached_investigation = None
 
-        if trace.termination_reason is None:
-            trace.termination_reason = workspace.get_termination_reason()
+    if cached_investigation is None:
+        try:
+            deps = AgentDeps(workspace=workspace, trace=trace)
+            prompt = f"Repository map:\n{repo_map}\n\nQuestion: {question}"
 
-    except Exception as e:
-        if not trace.failure_stage:
-            trace.failure_stage = FailureStage.AGENT_DECISION
-        trace.error_type = type(e).__name__
-        raise
+            try:
+                from pydantic_ai.usage import UsageLimits
+                MAX_MODEL_REQUESTS = 20
+                result = await investigation_agent.run(
+                    prompt,
+                    deps=deps,
+                    usage_limits=UsageLimits(request_limit=MAX_MODEL_REQUESTS)
+                )
+                trace.termination_reason = TerminationReason.MODEL_FINISHED
+                usage = result.usage
+                trace.model_requests = usage.requests
+                trace.input_tokens = usage.input_tokens
+                trace.output_tokens = usage.output_tokens
+                record_model_request_usage(trace, result)
+
+            except DomainTerminationException as e:
+                trace.termination_reason = TerminationReason(e.reason)
+            except UnexpectedModelBehavior:
+                trace.termination_reason = TerminationReason.MAX_ACTIONS
+
+            if trace.termination_reason is None:
+                trace.termination_reason = workspace.get_termination_reason()
+
+            if trace.termination_reason == TerminationReason.MODEL_FINISHED and result is not None:
+                cache_write_started = time.perf_counter()
+                try:
+                    investigation_cache.put(
+                        cache_key,
+                        {
+                            "repository_revision": gh_repo.revision,
+                            "investigation_result": result.output.model_dump(mode="json"),
+                            "gathered_evidence": workspace.gathered_evidence,
+                            "evidence_file_paths": sorted(workspace.gathered_evidence),
+                            "tool_sequence": [step.action_chosen for step in trace.steps],
+                            "usage": {
+                                "model_requests": trace.model_requests,
+                                "input_tokens": trace.input_tokens,
+                                "output_tokens": trace.output_tokens,
+                            },
+                            "termination_reason": trace.termination_reason.value,
+                        },
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    logger.warning("Investigation cache write failed: %s", type(exc).__name__)
+                finally:
+                    trace.investigation_cache_write_duration_sec = time.perf_counter() - cache_write_started
+
+        except Exception as e:
+            if not trace.failure_stage:
+                trace.failure_stage = FailureStage.AGENT_DECISION
+            trace.error_type = type(e).__name__
+            raise
 
     context = {
         "owner": owner,
@@ -157,6 +218,7 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
 
     trace.final_evidence_files_count = len(workspace.gathered_evidence)
     trace.final_evidence_chars = workspace.total_evidence_chars
+    trace.evidence_file_paths = sorted(workspace.gathered_evidence)
 
     logger.info("Generating streamed answer using Gemini...")
     ans_res = prepare_answer_stream(question, context)

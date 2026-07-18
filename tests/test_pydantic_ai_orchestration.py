@@ -42,8 +42,6 @@ def test_evidence_incomplete_rejection():
             summary_of_evidence="- read main.py",
             delegated_interfaces_discovered=["jwt"],
             concrete_implementations_read=[],
-            remaining_ambiguities="none",
-            final_answer="The token is handled here."
         )
         
         def model_func(messages, info):
@@ -98,7 +96,7 @@ def test_fatal_domain_termination_handling():
             
         assert excinfo.value.reason == "consecutive_no_progress"
 
-def test_max_actions_terminates_before_model_requests():
+def test_max_actions_terminates_before_model_requests_duplicate():
     """Verify MAX_ACTIONS=8 terminates before MAX_MODEL_REQUESTS=20."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)

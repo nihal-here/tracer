@@ -41,6 +41,20 @@ class AgentStepTrace:
 
 
 @dataclass
+class ModelRequestUsage:
+    """Usage exposed by one completed PydanticAI model response."""
+
+    request_number: int
+    input_tokens: int
+    output_tokens: int
+    cumulative_input_tokens: int
+    cumulative_output_tokens: int
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    preceding_tool_results: list[str] = field(default_factory=list)
+
+
+@dataclass
 class InvestigationTrace:
     started_at: str
     question_chars: int
@@ -54,12 +68,22 @@ class InvestigationTrace:
 
     final_evidence_files_count: int = 0
     final_evidence_chars: int = 0
+    evidence_file_paths: list[str] = field(default_factory=list)
+    cached_investigation_tool_sequence: list[str] = field(default_factory=list)
     answer_chunks_emitted: int = 0
     
     # PydanticAI metrics
     model_requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    model_request_usage: list[ModelRequestUsage] = field(default_factory=list)
+
+    investigation_cache_hit: bool = False
+    investigation_cache_lookup_duration_sec: float = 0.0
+    investigation_cache_write_duration_sec: float = 0.0
+    repository_snapshot_cache_hit: bool = False
+    repository_cache_lookup_duration_sec: float = 0.0
+    final_prompt_chars: int = 0
     
     termination_reason: TerminationReason | None = None
     failure_stage: FailureStage | None = None
@@ -104,6 +128,53 @@ def _dataclass_to_dict_safe(obj: Any) -> dict[str, Any]:
 
 def trace_to_dict(trace: InvestigationTrace) -> dict[str, Any]:
     return _dataclass_to_dict_safe(trace)
+
+
+def record_model_request_usage(trace: InvestigationTrace, result: Any) -> None:
+    """Record public PydanticAI per-response usage without provider internals.
+
+    ``AgentRunResult.all_messages()`` is a supported API. Each public
+    ``ModelResponse`` carries a public ``RequestUsage`` object. A response's
+    preceding ``ToolReturnPart`` values identify the tool results that were
+    present before that model request.
+    """
+    from pydantic_ai.messages import ModelRequest, ModelResponse, ToolReturnPart
+
+    try:
+        messages = result.all_messages()
+    except AttributeError:
+        return
+
+    cumulative_input = 0
+    cumulative_output = 0
+    pending_tool_results: list[str] = []
+    request_number = 0
+
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            pending_tool_results.extend(
+                part.tool_name for part in message.parts if isinstance(part, ToolReturnPart)
+            )
+        elif isinstance(message, ModelResponse):
+            request_number += 1
+            usage = message.usage
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+            cumulative_input += input_tokens
+            cumulative_output += output_tokens
+            trace.model_request_usage.append(
+                ModelRequestUsage(
+                    request_number=request_number,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cumulative_input_tokens=cumulative_input,
+                    cumulative_output_tokens=cumulative_output,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    preceding_tool_results=pending_tool_results,
+                )
+            )
+            pending_tool_results = []
 
 
 def emit_trace(trace: InvestigationTrace):

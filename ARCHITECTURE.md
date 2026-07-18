@@ -1,36 +1,145 @@
-# Trace Architecture Documentation
+# Trace Architecture
 
-This document outlines the architectural flow of Trace, detailing how requests travel from the User Interface to the AI and back.
+Trace is a small FastAPI application with a static browser client and one
+streaming investigation endpoint. It uses GitHub for repository data and
+Gemini through PydanticAI for repository investigation and final answer
+generation.
 
-## 1. System Overview
-Trace is a monolithic Python application built on **FastAPI**. It serves a static frontend and exposes a single unified streaming endpoint (`/investigate`). It relies on two external APIs:
-- **GitHub REST API**: For fetching repository metadata, file trees, and raw file contents.
-- **Google Gemini API**: For intelligent file selection and answer generation.
+## Request flow
 
-## 2. Request Flow
-When a user submits a question via the UI, the following sequence occurs:
+`POST /investigate` follows this sequence:
 
-1. **GitHub Data Gathering**:
-   - `investigation_service.py` fetches the repository metadata (stars, description).
-   - It fetches the recursive Git tree (`/git/trees/{branch}?recursive=1`).
+1. Resolve the GitHub repository metadata and default-branch commit SHA.
+2. Materialize the exact commit into the persistent filesystem snapshot cache.
+   A cache miss downloads and safely extracts the GitHub tarball; a hit reuses
+   the already extracted files.
+3. Read top-level file names and README content from the local snapshot.
+4. Filter noisy paths and build the deterministic hierarchical repository map.
+5. Build a versioned investigation-cache key from the repository identity,
+   commit SHA, normalized question, model, prompt version, tool version, and
+   workspace-policy version.
+6. On an investigation-cache hit, restore the structured result and gathered
+   evidence without making investigation-model requests. On a miss, run the
+   PydanticAI agent with `read_file`, `search_code`, and `list_directory`.
+7. Persist only successful, evidence-complete investigation results using an
+   atomic filesystem write.
+8. Generate the final answer in a separate Gemini streaming request. This
+   remains separate even when investigation evidence came from cache.
+9. Emit answer chunks as Server-Sent Events and release the request's snapshot
+   handle. Persistent cached snapshots are retained.
 
-2. **Intelligent File Selection**:
-   - The massive file tree is filtered to remove noise (e.g., `.venv/`, `node_modules/`).
-   - The remaining file paths are sent to Gemini using Structured Outputs (`pydantic` schemas) to strictly select the 5 most relevant files.
-   - The backend downloads the raw contents of those 5 specific files.
+The current implementation does not use Redis, a database, embeddings, RAG,
+or Gemini provider-side context caching.
 
-3. **Streaming the Answer**:
-   - The backend constructs a master prompt containing the repository metadata and the exact contents of the selected files.
-   - It initiates a `generate_content_stream` call to Gemini.
-   - As byte chunks arrive from Google, `investigation_service.py` yields them as Server-Sent Events (`data: {"chunk": "..."}\n\n`).
-   - The frontend reads the `ReadableStream` directly from the TCP socket, appending strings and re-rendering Markdown (`marked.js`) in real-time.
+## Caches
 
-## 3. Technology Stack
-- **Backend Framework**: FastAPI (Python)
-- **AI Integration**: `google-genai` SDK
-- **Frontend**: Vanilla HTML/CSS/JS, `marked.js`, `highlight.js`
-- **Testing**: `pytest`, `unittest.mock`
+Both caches use hashed filenames and never place repository names or questions
+directly in paths.
 
-## 4. Future Improvements (Phase 6+)
-- **AST Parsing**: Instead of downloading entire files, clone the repo locally and parse it into an Abstract Syntax Tree (AST) to chunk code by functions/classes.
-- **Context Caching**: Utilize Gemini's native Context Caching API to upload massive repositories directly to Google's servers, drastically reducing Input Tokens Per Minute (TPM) limits for consecutive questions on the same repository.
+### Repository snapshot cache
+
+The snapshot key is derived from:
+
+```text
+provider + owner + repository + exact commit SHA
+```
+
+The cache stores safely extracted files and a completion manifest. Population
+uses a temporary directory followed by an atomic directory rename. A simple
+per-key in-process lock prevents concurrent population of the same snapshot
+within one process. Corrupt, incomplete, expired, or incompatible entries are
+ignored and rebuilt.
+
+### Investigation-result cache
+
+The investigation key includes:
+
+```text
+provider
+owner
+repository
+exact commit SHA
+normalized question
+effective investigation model
+investigation prompt version
+tool schema version
+workspace policy version
+```
+
+Question normalization trims leading/trailing whitespace and collapses
+repeated whitespace. It does not lowercase or otherwise rewrite meaning.
+
+Only successful `model_finished` investigations are cached. Exceptions,
+budget terminations, invalid actions, incomplete work, and partial writes are
+not cached. Malformed entries are cache misses.
+
+The default cache root is the operating system temporary directory under
+`trace-cache`. It can be changed with:
+
+```text
+TRACE_CACHE_DIR=/path/to/cache
+TRACE_SNAPSHOT_CACHE_TTL_SECONDS=86400
+```
+
+If a project-local cache directory is used, `.trace-cache/` should remain
+ignored by Git. Cache failures degrade to the uncached path wherever possible.
+
+## Observability
+
+Trace logs aggregate request metrics including model requests, input/output
+tokens, evidence size, action counts, cache hits, and cache lookup/write
+durations.
+
+PydanticAI 2.13's public `AgentRunResult.all_messages()` API is used to inspect
+each public `ModelResponse.usage`. Per-response metrics include request number,
+input/output tokens, cumulative totals, cache read/write token fields, and the
+names of tool results immediately preceding the request. Per-request model
+latency is not exposed through this path and is not estimated.
+
+On an investigation-cache hit, current-request investigation usage remains
+zero. Historical usage is not copied into current-request counters.
+
+## Evaluation safety
+
+The evaluation runner is explicitly opt-in:
+
+```text
+python -m evals.runner
+python -m evals.runner --case requests-session-002
+python -m evals.runner --all --confirm-live
+```
+
+The first command only prints usage. The full suite is rejected without
+`--confirm-live`. Diagnostics follow the same explicit-selection policy:
+
+```text
+python -m evals.run_diagnostics --case httpx-transport-004
+python -m evals.run_diagnostics --all --confirm-live
+```
+
+Offline unit tests do not start either live runner.
+
+## Deliberately separate final-answer pass
+
+The investigation agent currently returns structured evidence metadata while
+the final-answer service owns presentation and streaming. Combining them could
+save one model pass and avoid resending evidence, but it would couple evidence
+validation, retry behavior, answer formatting, and model selection. It would
+also make streaming structured output more complex. This remains a future
+optimization, not part of the current cache phase.
+
+## Future context-efficiency work
+
+Per-request usage should first be used to measure history growth. Likely Phase F
+work, in order, is:
+
+1. bound or line-range `read_file` results;
+2. return compact search/listing summaries where full content is unnecessary;
+3. retain evidence in a local evidence store and send references or selected
+   excerpts rather than replaying every full tool result;
+4. evaluate PydanticAI history processors or selective history retention;
+5. compact final-answer evidence while preserving file and line grounding.
+
+Gemini provider-side context caching can be revisited after these measurements,
+but it is not currently enabled because tool/system-prompt ownership and cache
+lifecycle would add substantial complexity.

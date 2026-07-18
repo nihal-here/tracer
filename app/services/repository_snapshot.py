@@ -1,9 +1,15 @@
 import os
+import json
+import hashlib
+import shutil
 import tarfile
 import tempfile
 import requests
 import logging
+import threading
+import time
 from pathlib import Path
+from typing import Any, cast
 from app.services.github import (
     GitHubRepository,
     RepositoryArchiveTooLargeError,
@@ -13,6 +19,8 @@ from app.services.github import (
     GitHubTimeoutError,
     check_github_response
 )
+from app.cache_versions import SNAPSHOT_CACHE_SCHEMA_VERSION
+from app.services.investigation_cache import cache_root
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +31,42 @@ MAX_ARCHIVE_MEMBERS = 10_000
 MAX_INDIVIDUAL_FILE_BYTES = 10 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
 
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _snapshot_cache_key(repo: GitHubRepository) -> str:
+    raw = f"github\0{repo.owner}\0{repo.name}\0{repo.revision}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _snapshot_lock(key: str) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _remove_cache_entry(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
 class RepositorySnapshot:
-    def __init__(self, gh_repo: GitHubRepository):
+    def __init__(self, gh_repo: GitHubRepository, cache_dir: Path | None = None):
         self.gh_repo = gh_repo
+        self.cache_dir = cache_dir.expanduser() if cache_dir is not None else None
         self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self.root_path: Path | None = None
         self.extracted_files: frozenset[str] = frozenset()
+        self.is_cached = False
+        self.cache_hit = False
+        self.cache_lookup_duration_sec = 0.0
+        self._cache_entry: Path | None = None
 
     def __enter__(self):
         self.materialize()
@@ -38,20 +76,114 @@ class RepositorySnapshot:
         self.cleanup()
 
     def materialize(self):
-        if self.temp_dir is not None:
+        if self.root_path is not None:
             return
 
-        self.temp_dir = tempfile.TemporaryDirectory()
-        base_path = Path(self.temp_dir.name)
-        archive_path = base_path / "repo.tar.gz"
-        extract_path = base_path / "extracted"
-        extract_path.mkdir()
+        root = (self.cache_dir or cache_root()) / "snapshots"
+        key = _snapshot_cache_key(self.gh_repo)
+        final_entry = root / key
+        started = time.perf_counter()
 
         try:
-            self._do_materialize(archive_path, extract_path)
+            root.mkdir(parents=True, exist_ok=True)
+            with _snapshot_lock(key):
+                cached_files = self._load_cached_entry(final_entry)
+                if cached_files is not None:
+                    self.root_path = final_entry / "extracted"
+                    self.extracted_files = frozenset(cached_files)
+                    self.is_cached = True
+                    self.cache_hit = True
+                    self._cache_entry = final_entry
+                    return
+
+                if final_entry.exists():
+                    _remove_cache_entry(final_entry)
+
+                population = Path(tempfile.mkdtemp(prefix=f".{key}.", dir=root))
+                extract_path = population / "extracted"
+                extract_path.mkdir()
+                try:
+                    self._do_materialize(population / "repo.tar.gz", extract_path)
+                    manifest = {
+                        "cache_schema_version": SNAPSHOT_CACHE_SCHEMA_VERSION,
+                        "created_at": time.time(),
+                        "owner": self.gh_repo.owner,
+                        "name": self.gh_repo.name,
+                        "revision": self.gh_repo.revision,
+                        "extracted_files": sorted(self.extracted_files),
+                    }
+                    self._write_manifest(population / "complete.json", manifest)
+                    os.replace(population, final_entry)
+                    self.root_path = final_entry / "extracted"
+                    self.extracted_files = frozenset(cast(list[str], manifest["extracted_files"]))
+                    self.is_cached = True
+                    self.cache_hit = False
+                    self._cache_entry = final_entry
+                except Exception:
+                    shutil.rmtree(population, ignore_errors=True)
+                    raise
+        except OSError as exc:
+            logger.warning("Repository snapshot cache unavailable; using temporary materialization: %s", type(exc).__name__)
+            self._materialize_temporary()
+        finally:
+            self.cache_lookup_duration_sec = time.perf_counter() - started
+            logger.debug("Repository snapshot cache lookup/materialization took %.6fs", self.cache_lookup_duration_sec)
+
+    def _materialize_temporary(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        base_path = Path(self.temp_dir.name)
+        extract_path = base_path / "extracted"
+        extract_path.mkdir()
+        try:
+            self._do_materialize(base_path / "repo.tar.gz", extract_path)
+            self.is_cached = False
+            self.cache_hit = False
         except Exception:
             self.cleanup()
             raise
+
+    def _load_cached_entry(self, entry: Path) -> list[str] | None:
+        manifest_path = entry / "complete.json"
+        extracted_path = entry / "extracted"
+        try:
+            with manifest_path.open("r", encoding="utf-8") as f:
+                raw_manifest = json.load(f)
+            if not isinstance(raw_manifest, dict):
+                return None
+            manifest: dict[str, Any] = raw_manifest
+            max_age = os.environ.get("TRACE_SNAPSHOT_CACHE_TTL_SECONDS")
+            if max_age:
+                age = time.time() - float(manifest["created_at"])
+                if age > float(max_age):
+                    return None
+            if manifest.get("cache_schema_version") != SNAPSHOT_CACHE_SCHEMA_VERSION:
+                return None
+            if manifest.get("owner") != self.gh_repo.owner:
+                return None
+            if manifest.get("name") != self.gh_repo.name:
+                return None
+            if manifest.get("revision") != self.gh_repo.revision:
+                return None
+            files = manifest.get("extracted_files")
+            if not isinstance(files, list) or not extracted_path.is_dir():
+                return None
+            for path in files:
+                if not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts:
+                    return None
+                if not (extracted_path / path).resolve().is_relative_to(extracted_path.resolve()):
+                    return None
+                if not (extracted_path / path).is_file():
+                    return None
+            return files
+        except (FileNotFoundError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _write_manifest(path: Path, manifest: dict[str, Any]):
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(manifest, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
 
     def _do_materialize(self, archive_path: Path, extract_path: Path):
         url = f"{GITHUB_API_BASE}/{self.gh_repo.owner}/{self.gh_repo.name}/tarball/{self.gh_repo.revision}"
@@ -169,8 +301,37 @@ class RepositorySnapshot:
         self.extracted_files = frozenset(extracted_paths)
 
     def cleanup(self):
+        if self.is_cached:
+            self.root_path = None
+            self.extracted_files = frozenset()
+            self._cache_entry = None
+            self.is_cached = False
+            self.cache_hit = False
+            return
         if self.temp_dir:
             self.temp_dir.cleanup()
             self.temp_dir = None
             self.root_path = None
             self.extracted_files = frozenset()
+            self.cache_hit = False
+
+    def list_top_level_files(self) -> list[str]:
+        """Return the names visible at the repository root from local files."""
+        names = {path.split("/", 1)[0] for path in self.extracted_files if path}
+        return sorted(names)
+
+    def get_readme(self) -> str | None:
+        """Read a conventional README from the materialized snapshot."""
+        if self.root_path is None:
+            return None
+        candidates = [
+            path for path in self.extracted_files
+            if "/" not in path and path.lower().startswith("readme")
+        ]
+        candidates.sort(key=lambda path: (path.lower() != "readme.md", path.lower()))
+        for relative_path in candidates:
+            try:
+                return (self.root_path / relative_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+        return None

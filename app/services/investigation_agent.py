@@ -29,6 +29,9 @@ class InvestigationResult(BaseModel):
     )
 
 
+INVESTIGATION_MODEL = "google:gemini-3.1-flash-lite"
+
+
 # System prompt with strict evidence-completeness policy
 SYSTEM_PROMPT = """You are an expert software investigator analyzing a code repository.
 
@@ -46,7 +49,7 @@ CRITICAL EVIDENCE-COMPLETENESS POLICY:
 """
 
 investigation_agent = Agent(
-    "google:gemini-3.1-flash-lite",
+    INVESTIGATION_MODEL,
     deps_type=AgentDeps,
     output_type=InvestigationResult,
     system_prompt=SYSTEM_PROMPT,

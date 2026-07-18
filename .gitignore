@@ -217,3 +217,5 @@ eval_results.json
 diagnostic_output.txt
 diagnostic_output_v2.txt
 diagnostic_output_v3.txt
+.trace-cache/
+scratch/

@@ -1,5 +1,6 @@
 import pytest
 import base64
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 from app.services.github import GitHubRepository, InvalidGitHubURLError, GitHubAPIError
@@ -135,8 +136,9 @@ class TestGitHubRepository(unittest.TestCase):
     @patch("app.services.repository_snapshot.requests.get")
     def test_snapshot_cleanup_on_failure(self, mock_get):
         from app.services.repository_snapshot import RepositorySnapshot, RepositoryArchiveTooLargeError
+        from pathlib import Path
         repo = GitHubRepository(owner="testowner", name="testrepo", revision="abc", default_branch="main", metadata={})
-        snapshot = RepositorySnapshot(repo)
+        snapshot = RepositorySnapshot(repo, cache_dir=Path(tempfile.mkdtemp(prefix="trace-test-snapshot-cleanup-")))
 
         mock_response = MagicMock()
         mock_response.headers = {"Content-Length": "9999999999"}
@@ -160,8 +162,9 @@ class TestGitHubRepository(unittest.TestCase):
             mock_get.return_value.__enter__.return_value = mock_response2
             snapshot.materialize()
 
-            self.assertIsNotNone(snapshot.temp_dir)
+            self.assertIsNone(snapshot.temp_dir)
             self.assertIsNotNone(snapshot.root_path)
+            self.assertTrue(snapshot.is_cached)
 
 def test_github_403_rate_limit_classification():
     from app.services.github import check_github_response, GitHubRateLimitError, GitHubAPIError

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 from app.services.repository_snapshot import RepositorySnapshot
 import json
 import logging
@@ -103,19 +103,19 @@ def _validate_directory_arg(raw: str | None, root: Path) -> Path | None:
 
 
 class InvestigationWorkspace:
-    MAX_ACTIONS = 8
-    MAX_UNIQUE_FILES = 8
-    MAX_FILE_CHARS = 20_000
-    MAX_TOTAL_EVIDENCE_CHARS = 80_000
-    MAX_INVALID_ACTIONS = 3
-    MAX_CONSECUTIVE_NO_PROGRESS = 2
+    MAX_ACTIONS: int = 8
+    MAX_UNIQUE_FILES: int = 8
+    MAX_FILE_CHARS: int = 20_000
+    MAX_TOTAL_EVIDENCE_CHARS: int = 80_000
+    MAX_INVALID_ACTIONS: int = 3
+    MAX_CONSECUTIVE_NO_PROGRESS: int = 2
 
     # Search Budgets
-    MAX_SEARCHES = 4
-    MAX_SEARCH_RESULTS = 50
-    MAX_RESULT_LINE_CHARS = 200
+    MAX_SEARCHES: int = 4
+    MAX_SEARCH_RESULTS: int = 50
+    MAX_RESULT_LINE_CHARS: int = 200
     # Per-file size limit passed to ripgrep (--max-filesize).
-    MAX_FILE_SIZE_BYTES = 10_485_760  # 10 MiB per file
+    MAX_FILE_SIZE_BYTES: int = 10_485_760  # 10 MiB per file
 
     # LIST_DIRECTORY budget policy
     # ----------------------------
@@ -130,7 +130,7 @@ class InvestigationWorkspace:
     # Reaching MAX_SEARCHES still allows READ_FILE and LIST_DIRECTORY as
     # long as MAX_ACTIONS has not been exhausted.
 
-    def __init__(self, snapshot: RepositorySnapshot, allowed_paths: list[str]):
+    def __init__(self, snapshot: RepositorySnapshot, allowed_paths: Iterable[str]):
         self.snapshot = snapshot
         self.allowed_paths = frozenset(allowed_paths)
 

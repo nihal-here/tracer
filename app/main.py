@@ -54,6 +54,8 @@ async def investigate(request: InvestigateRequest):
             t_mat = time.perf_counter()
             snapshot.materialize()
             trace.materialization_duration_sec = time.perf_counter() - t_mat
+            trace.repository_snapshot_cache_hit = snapshot.cache_hit
+            trace.repository_cache_lookup_duration_sec = snapshot.cache_lookup_duration_sec
     except Exception as e:
         if not trace.failure_stage:
             # If resolution duration wasn't fully computed, assume it failed during resolution

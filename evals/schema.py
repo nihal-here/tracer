@@ -15,8 +15,8 @@ class EvaluationCase(BaseModel):
 class RunMetadata(BaseModel):
     timestamp: str
     model: str
-    repository_revision: Optional[str] = Field(None, description="The exact commit SHA resolved for this run.")
-    repository_branch: Optional[str] = Field(None, description="The human readable branch name.")
+    repository_revision: Optional[str] = None
+    repository_branch: Optional[str] = None
     case_id: str
     schema_version: str = "1.1"
     pricing_assumption: str = "Pricing not dynamically queried. See manual pricing docs."

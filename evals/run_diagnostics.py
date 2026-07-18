@@ -1,5 +1,5 @@
 import asyncio
-import json
+import argparse
 from evals.schema import EvaluationCase
 from evals.cases import httpx_transport_case, pydantic_types_case
 from app.services.github import GitHubRepository
@@ -11,10 +11,10 @@ from app.services.investigation_workspace import InvestigationWorkspace
 
 async def run_case_with_limit(case: EvaluationCase, limit: int):
     print(f"\n==============================================")
-    print(f"Running {case.id} with MAX_ITERATIONS={limit}")
+    print(f"Running {case.id} with MAX_ACTIONS={limit}")
     print(f"==============================================\n")
     
-    InvestigationWorkspace.MAX_ITERATIONS = limit
+    setattr(InvestigationWorkspace, "MAX_ACTIONS", limit)
     
     gh_repo = GitHubRepository.from_url(case.repository_url)
     snapshot = RepositorySnapshot(gh_repo=gh_repo)
@@ -50,15 +50,61 @@ async def run_case_with_limit(case: EvaluationCase, limit: int):
         
     print("\n")
     
-    # Let's restore limit
-    InvestigationWorkspace.MAX_ITERATIONS = 8
+    # Restore the production action budget after diagnostics.
+    setattr(InvestigationWorkspace, "MAX_ACTIONS", 8)
 
-async def main():
+
+DIAGNOSTIC_CASES = {
+    httpx_transport_case.id: httpx_transport_case,
+    pydantic_types_case.id: pydantic_types_case,
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run Trace diagnostics explicitly against live services.")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--case", metavar="CASE_ID", help="Run one diagnostic case.")
+    selection.add_argument("--all", action="store_true", help="Run both diagnostic cases.")
+    parser.add_argument("--confirm-live", action="store_true", help="Confirm live GitHub/Gemini calls.")
+    return parser
+
+
+async def run_selected(cases: list[EvaluationCase]) -> None:
     for limit in [8, 12]:
-        await run_case_with_limit(httpx_transport_case, limit)
-        await asyncio.sleep(60)
-        await run_case_with_limit(pydantic_types_case, limit)
-        await asyncio.sleep(60)
+        for index, case in enumerate(cases):
+            await run_case_with_limit(case, limit)
+            if index < len(cases) - 1 or limit != 12:
+                await asyncio.sleep(60)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.case and not args.all:
+        parser.print_usage()
+        print("No live diagnostics were run. Use --case CASE_ID, or --all --confirm-live.")
+        return 0
+
+    if args.case:
+        case = DIAGNOSTIC_CASES.get(args.case)
+        if case is None:
+            print(f"Unknown diagnostic case ID: {args.case}")
+            print("Available case IDs:")
+            for case_id in DIAGNOSTIC_CASES:
+                print(f"  {case_id}")
+            return 2
+        asyncio.run(run_selected([case]))
+        return 0
+
+    if not args.confirm_live:
+        print("Refusing to run all diagnostics without --confirm-live.")
+        print("Diagnostics make multiple live GitHub and Gemini API calls.")
+        return 2
+
+    print("WARNING: diagnostics make multiple live GitHub and Gemini API calls.")
+    asyncio.run(run_selected(list(DIAGNOSTIC_CASES.values())))
+    return 0
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import json
 import time
 from datetime import datetime, timezone
@@ -67,12 +68,13 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
     
     final_answer = "".join(answer_chunks)
     
-    files_read = []
+    files_read = list(trace.evidence_file_paths)
     tool_sequence = []
     for step in trace.steps:
         tool_sequence.append(step.action_chosen)
-        if step.action_chosen == "read_file":
-            files_read.append(step.action_arguments.get("file_path"))
+        file_path = step.action_arguments.get("file_path")
+        if step.action_chosen == "read_file" and file_path and file_path not in files_read:
+            files_read.append(file_path)
             
     evidence_score = score_evidence_completeness(files_read, case.expected_evidence_groups)
     terms_score = score_expected_terms(final_answer, case.expected_answer_terms)
@@ -179,12 +181,13 @@ def aggregate_suite_results(results: list[EvaluationResult]) -> SuiteSummary:
         total_directory_listings_used=sum(r.directory_listings_used for r in results)
     )
 
-async def main():
+async def run_cases(cases: list[EvaluationCase]) -> None:
     results = []
-    for case in ALL_CASES:
+    for case in cases:
         res = await evaluate_case(case)
         results.append(res)
-        await asyncio.sleep(20) # Avoid Gemini API rate limits
+        if len(cases) > 1:
+            await asyncio.sleep(20) # Avoid Gemini API rate limits
         
     summary = aggregate_suite_results(results)
     suite_result = SuiteEvaluationResult(summary=summary, results=results)
@@ -194,5 +197,49 @@ async def main():
         
     print(f"Evaluated {len(results)} cases. Successful: {summary.successful_cases}. Results saved to eval_results.json.")
 
+
+def _case_by_id(case_id: str) -> EvaluationCase | None:
+    return next((case for case in ALL_CASES if case.id == case_id), None)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run Trace's live Gemini/GitHub evaluation cases explicitly.")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--case", metavar="CASE_ID", help="Run exactly one live evaluation case.")
+    selection.add_argument("--all", action="store_true", help="Run the complete live evaluation suite.")
+    parser.add_argument("--confirm-live", action="store_true", help="Confirm that the selected run makes live API/model calls.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.case and not args.all:
+        parser.print_usage()
+        print("No live evaluation was run. Use --case CASE_ID, or --all --confirm-live.")
+        return 0
+
+    if args.case:
+        case = _case_by_id(args.case)
+        if case is None:
+            print(f"Unknown case ID: {args.case}")
+            print("Available case IDs:")
+            for available in ALL_CASES:
+                print(f"  {available.id}")
+            return 2
+        asyncio.run(run_cases([case]))
+        return 0
+
+    if not args.confirm_live:
+        print("Refusing to run the full live suite without --confirm-live.")
+        print("The full suite makes multiple GitHub and Gemini API calls.")
+        return 2
+
+    print("WARNING: running all evaluation cases will make multiple live GitHub and Gemini API calls.")
+    asyncio.run(run_cases(ALL_CASES))
+    return 0
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())
