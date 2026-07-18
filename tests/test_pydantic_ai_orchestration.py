@@ -7,7 +7,13 @@ os.environ["GOOGLE_API_KEY"] = "mock"
 
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from app.services.investigation_agent import investigation_agent, AgentDeps, InvestigationResult, DomainTerminationException
+from app.services.investigation_agent import (
+    InvestigationResult,
+    DomainTerminationException,
+    investigation_agent,
+    AgentDeps,
+    EvidenceExcerpt,
+)
 from app.services.investigation_workspace import InvestigationWorkspace
 from app.investigation_trace import InvestigationTrace, TerminationReason
 from pathlib import Path
@@ -41,6 +47,7 @@ def test_evidence_incomplete_rejection():
         result_payload = InvestigationResult(
             summary_of_evidence="- read main.py",
             delegated_interfaces_discovered=["jwt"],
+            relevant_excerpts=[EvidenceExcerpt(path="main.py", start_line=1, end_line=1, justification="x")],
             concrete_implementations_read=[],
         )
         

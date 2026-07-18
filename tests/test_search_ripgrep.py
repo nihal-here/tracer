@@ -63,7 +63,7 @@ def test_search_code_literal_match(tmp_path: Path):
     assert obs.result_status == "success"
     assert obs.new_evidence_added is True
     assert obs.content is not None
-    assert "main.py:1: def foo():" in obs.content
+    assert "main.py\n  1: def foo():" in obs.content
 
 
 def test_search_code_no_match(tmp_path: Path):
@@ -130,7 +130,7 @@ def test_search_code_max_results_cap(tmp_path: Path):
     assert obs.result_status == "success"
     assert obs.content is not None
     assert "Scanning halted due to budget exhaustion" in obs.content
-    assert obs.content.count("many.py:") == InvestigationWorkspace.MAX_SEARCH_RESULTS
+    assert obs.content.count("  ") == InvestigationWorkspace.MAX_SEARCH_RESULTS
 
 
 def test_search_code_max_searches_budget(tmp_path: Path):
@@ -505,5 +505,5 @@ def test_search_code_popen_stops_after_max_results(tmp_path: Path):
     assert obs.content is not None
     # Must have stopped at MAX_SEARCH_RESULTS, not read all over_limit lines
     assert lines_consumed[0] <= InvestigationWorkspace.MAX_SEARCH_RESULTS + 1  # +1 for the line that trips the limit
-    assert obs.content.count("main.py:") == InvestigationWorkspace.MAX_SEARCH_RESULTS
+    assert obs.content.count("  ") == InvestigationWorkspace.MAX_SEARCH_RESULTS
     assert "budget exhaustion" in obs.content

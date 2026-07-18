@@ -12,6 +12,11 @@ from app.services.investigation_cache import InvestigationCache, InvestigationCa
 from app.services.repository_snapshot import RepositorySnapshot, _snapshot_cache_key
 from app.investigation_trace import InvestigationTrace
 from app.investigation_trace import record_model_request_usage
+from app.cache_versions import (
+    INVESTIGATION_PROMPT_VERSION,
+    TOOL_SCHEMA_VERSION,
+    WORKSPACE_POLICY_VERSION,
+)
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.usage import RequestUsage
 
@@ -35,17 +40,22 @@ def make_key(**overrides):
         revision=str(values["revision"]),
         question=str(values["question"]),
         model=str(values["model"]),
-        prompt_version=int(str(values.get("prompt_version", 1))),
-        tool_schema_version=int(str(values.get("tool_schema_version", 1))),
-        workspace_policy_version=int(str(values.get("workspace_policy_version", 1))),
+        prompt_version=int(str(values.get("prompt_version", INVESTIGATION_PROMPT_VERSION))),
+        tool_schema_version=int(str(values.get("tool_schema_version", TOOL_SCHEMA_VERSION))),
+        workspace_policy_version=int(str(values.get("workspace_policy_version", WORKSPACE_POLICY_VERSION))),
     )
 
 
 def make_cache_value(evidence=None):
     evidence = evidence or {"main.py": "print('hello')"}
     return {
-        "investigation_result": {"summary_of_evidence": "ok"},
-        "gathered_evidence": evidence,
+        "investigation_result": {
+            "summary_of_evidence": "ok",
+            "delegated_interfaces_discovered": [],
+            "relevant_excerpts": [{"path": "main.py", "start_line": 1, "end_line": 1, "justification": "x"}],
+            "concrete_implementations_read": []
+        },
+        "evidence_spans": [{"path": "main.py", "start_line": 1, "end_line": 1, "content": "print('hello')", "source_action_index": 0, "truncated": False}],
         "evidence_file_paths": sorted(evidence),
         "tool_sequence": ["read_file"],
         "usage": {"model_requests": 1, "input_tokens": 10, "output_tokens": 2},
@@ -91,7 +101,7 @@ def test_investigation_cache_round_trip_and_key_dimensions(tmp_path):
 
     cached = cache.get(key)
     assert cached is not None
-    assert cached["gathered_evidence"] == {"main.py": "print('hello')"}
+    assert cached["evidence_spans"][0]["content"] == "print('hello')"
     assert cache.get(make_key(question="Different question")) is None
     assert cache.get(make_key(revision="sha2")) is None
     assert cache.get(make_key(model="google:other-model")) is None
@@ -233,7 +243,7 @@ def test_investigation_cache_hit_skips_agent_and_keeps_current_usage_zero(tmp_pa
 
     with patch("app.services.investigation_service.investigation_agent.run", new=AsyncMock(side_effect=AssertionError("agent ran"))), \
          patch("app.services.investigation_service.prepare_answer_stream", return_value=AnswerGeneratorResult(0, iter(["answer"]))):
-        events = asyncio.run(collect())
+        print('CACHE CONTENTS:'); import os; os.system(f'cat {tmp_path}/cache/investigations/*.json'); print('CACHE CONTENTS:'); import os; os.system(f'cat {tmp_path}/cache/investigations/*.json'); events = asyncio.run(collect())
 
     assert events[-1].__class__.__name__ == "InvestigationCompleted"
     assert trace.investigation_cache_hit is True

@@ -25,7 +25,9 @@ def test_workspace_valid_read(tmp_path):
     assert obs1.new_evidence_added is True
     assert workspace.actions == 1
     assert workspace.consecutive_no_progress == 0
-    assert obs1.content == "content1"
+    assert obs1.content is not None
+    assert "content1" in obs1.content
+    assert "[File: valid.py | Lines 1-1 of 1]" in obs1.content
 
 def test_workspace_duplicate_read_mechanics(tmp_path):
     files = {"valid.py": "content1"}
@@ -73,14 +75,16 @@ def test_workspace_max_file_chars_truncation(tmp_path):
     assert obs.result_status == "success"
     assert obs.content is not None
     assert len(obs.content) < len(long_content)
-    assert "[Truncated]" in obs.content
+    assert "File truncated" in obs.content
 
-def test_workspace_max_total_evidence_chars(tmp_path):
-    files = {"f1.py": "1234567890_this_will_be_cut"}
+    workspace.total_evidence_chars = InvestigationWorkspace.MAX_TOTAL_EVIDENCE_CHARS - 20
+
+    # We add a newline so it forms a complete line that can be returned
+    files = {"f1.py": "1234567890\n_this_will_be_cut"}
     snapshot = create_mock_snapshot(tmp_path, files)
     workspace = InvestigationWorkspace(snapshot, allowed_paths=["f1.py", "f2.py"])
 
-    workspace.total_evidence_chars = InvestigationWorkspace.MAX_TOTAL_EVIDENCE_CHARS - 10
+    workspace.total_evidence_chars = InvestigationWorkspace.MAX_TOTAL_EVIDENCE_CHARS - 15
 
     obs = workspace.read_file("f1.py")
     assert obs.content is not None
@@ -94,7 +98,7 @@ def test_search_code_literal(tmp_path):
     obs = workspace.search_code("foo")
     assert obs.result_status == "success"
     assert obs.content is not None
-    assert "main.py:1: def foo():" in obs.content
+    assert "main.py\n  1: def foo():" in obs.content
     assert obs.new_evidence_added is True
 
 def test_search_code_limits(tmp_path):
@@ -105,7 +109,7 @@ def test_search_code_limits(tmp_path):
     obs = workspace.search_code("foo")
     assert obs.content is not None
     assert "Scanning halted due to budget exhaustion" in obs.content
-    assert obs.content.count("main.py:") == InvestigationWorkspace.MAX_SEARCH_RESULTS
+    assert obs.content.count("  ") == InvestigationWorkspace.MAX_SEARCH_RESULTS
 
 def test_search_code_oversized_file_skipped(tmp_path):
     """Files exceeding MAX_FILE_SIZE_BYTES are skipped by ripgrep (--max-filesize)."""

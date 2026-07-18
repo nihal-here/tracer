@@ -19,33 +19,48 @@ class AgentDeps:
     trace: InvestigationTrace
 
 
+class EvidenceExcerpt(BaseModel):
+    path: str = Field(description="The exact repository-relative path of the file.")
+    start_line: int = Field(description="The starting line number (inclusive) of the relevant evidence.")
+    end_line: int = Field(description="The ending line number (inclusive) of the relevant evidence.")
+    justification: str = Field(description="Why this specific code block is relevant to the final answer.")
+
+
 class InvestigationResult(BaseModel):
     summary_of_evidence: str = Field(description="Summary of the evidence gathered.")
     delegated_interfaces_discovered: list[str] = Field(
         description="List of any delegated interfaces, abstractions, or functions discovered that defer their concrete implementation (e.g., 'strategy.read_token', 'Repository.save')."
     )
-    concrete_implementations_read: list[str] = Field(
-        description="List of exact file paths read that contain the concrete implementations of the delegated interfaces discovered."
+    relevant_excerpts: list[EvidenceExcerpt] = Field(
+        description="Crucial: Select specific, exact line ranges from the files you actually read via 'read_file' that support your final answer. These excerpts will be injected into the final answer generation step."
+    )
+    concrete_implementations_read: list[EvidenceExcerpt] = Field(
+        description="List of exact excerpts you read that contain the concrete implementations of the delegated interfaces discovered."
     )
 
 
 INVESTIGATION_MODEL = "google:gemini-3.1-flash-lite"
 
 
-# System prompt with strict evidence-completeness policy
 SYSTEM_PROMPT = """You are an expert software investigator analyzing a code repository.
 
 Investigation strategy:
 - Use 'list_directory' to expand a directory when you need to navigate.
 - Use 'search_code' for symbol or text discovery. Scope it with 'target_directory' when you expect noisy global results.
-- Use 'read_file' for direct evidence once you know the exact file path.
+- Use 'read_file' around that line to follow delegated implementations. Avoid reading large files from line 1 when search results already identify the relevant location.
+- Use narrow line windows around symbols and expand ranges only when needed.
 
 CRITICAL EVIDENCE-COMPLETENESS POLICY:
-- If evidence delegates an important mechanism to another symbol, interface, strategy, or abstraction (e.g., calling `strategy.read_token(...)` or delegating to a backend), YOU MUST FOLLOW THAT DEPENDENCY into its concrete implementation before finishing.
+- If evidence delegates an important mechanism to another symbol, interface, strategy, or abstraction, YOU MUST FOLLOW THAT DEPENDENCY into its concrete implementation before finishing.
 - Do NOT finish merely because behavior can be inferred from interface names or abstraction signatures.
 - You must actively navigate/search for at least one concrete implementation of the delegated behavior and read its code.
-- Your final `InvestigationResult` requires you to list the concrete files you read for these delegations.
+- Your final `InvestigationResult` requires you to explicitly cite the concrete implementation excerpts you read.
 - Avoid exhaustive traversal unrelated to the user's question, but core requested mechanisms must be traced down to their concrete logic.
+
+FINAL EVIDENCE GROUNDING:
+- You must explicitly select `relevant_excerpts` in your final result.
+- Every excerpt you claim MUST have been actually observed via a successful `read_file` tool call during this investigation.
+- If you cite unread lines, your result will be rejected.
 """
 
 investigation_agent = Agent(
@@ -61,9 +76,16 @@ investigation_agent = Agent(
 def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: InvestigationResult) -> InvestigationResult:
     """
     Ensures that if the model claims to have discovered delegated interfaces,
-    it actually successfully read concrete implementations for them, and those
-    files are genuinely in the gathered evidence.
+    it actually successfully read concrete implementations for them.
+    Also validates that ALL claimed excerpts were actually observed in an EvidenceSpan.
     """
+    workspace = ctx.deps.workspace
+
+    if not result.relevant_excerpts:
+        raise ModelRetry(
+            "You did not provide any relevant_excerpts. You must select the exact observed line ranges that support your answer."
+        )
+
     if result.delegated_interfaces_discovered:
         if not result.concrete_implementations_read:
             raise ModelRetry(
@@ -71,14 +93,33 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
                 "You must use list_directory or search_code to locate and read the implementation files before finishing."
             )
 
-        # Verify the model didn't just hallucinate reading a file
-        gathered_files = set(ctx.deps.workspace.gathered_evidence.keys())
-        missing = [f for f in result.concrete_implementations_read if f not in gathered_files]
-        if missing:
+    # Validate all excerpts against observed EvidenceSpans
+    all_excerpts_to_check = result.relevant_excerpts + result.concrete_implementations_read
+
+    for excerpt in all_excerpts_to_check:
+        spans_for_path = [s for s in workspace.evidence_spans if s.path == excerpt.path]
+        if not spans_for_path:
             raise ModelRetry(
-                f"You claimed to have read concrete implementations in files {missing}, but they were not successfully read. "
-                "You must actually invoke `read_file` on these paths."
+                f"You claimed evidence for {excerpt.path} but never successfully read this file. "
+                "You must use `read_file` to observe it before citing it."
             )
+
+        # Check if [excerpt.start_line, excerpt.end_line] is fully covered by the union of spans
+        # Since ranges are inclusive, we can check integer coverage
+        requested_lines = set(range(excerpt.start_line, excerpt.end_line + 1))
+        observed_lines = set()
+        for span in spans_for_path:
+            observed_lines.update(range(span.start_line, span.end_line + 1))
+
+        unobserved = requested_lines - observed_lines
+        if unobserved:
+            min_unobs = min(unobserved)
+            max_unobs = max(unobserved)
+            raise ModelRetry(
+                f"You claimed evidence for {excerpt.path}:{excerpt.start_line}-{excerpt.end_line} but lines {min_unobs}-{max_unobs} were never observed. "
+                f"You must invoke `read_file` to observe these lines before citing them."
+            )
+
     return result
 
 
@@ -92,13 +133,13 @@ def _check_domain_termination(deps: AgentDeps):
 
 
 @investigation_agent.tool
-def read_file(ctx: RunContext[AgentDeps], file_path: str) -> str:
-    """Fetch a complete file. Requires 'file_path' (exact repository-relative path)."""
+def read_file(ctx: RunContext[AgentDeps], file_path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+    """Fetch a file or line range. Requires 'file_path'. Optional: 'start_line', 'end_line' (1-indexed inclusive)."""
     _check_domain_termination(ctx.deps)
 
     workspace = ctx.deps.workspace
     t_start = time.perf_counter()
-    obs = workspace.read_file(file_path)
+    obs = workspace.read_file(file_path, start_line, end_line)
     duration = time.perf_counter() - t_start
 
     step_trace = AgentStepTrace(

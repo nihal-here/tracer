@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Iterable, Optional
+from pydantic import BaseModel
 from app.services.repository_snapshot import RepositorySnapshot
 import json
 import logging
@@ -20,6 +21,15 @@ logger = logging.getLogger(__name__)
 # practice we stop much earlier once MAX_SEARCH_RESULTS match-lines are
 # accumulated.
 _RG_MAX_STDOUT_LINES = 10_000
+
+
+class EvidenceSpan(BaseModel):
+    path: str
+    start_line: int
+    end_line: int
+    content: str
+    source_action_index: int
+    truncated: bool = False
 
 
 @dataclass
@@ -143,6 +153,7 @@ class InvestigationWorkspace:
         self.total_searches = 0
 
         self.gathered_evidence: dict[str, str] = {}
+        self.evidence_spans: list[EvidenceSpan] = []
         self.history: list[AgentObservation] = []
         self.is_finished = False
 
@@ -181,7 +192,7 @@ class InvestigationWorkspace:
     # READ_FILE
     # -------------------------------------------------------------------------
 
-    def read_file(self, requested_path: str | None) -> AgentObservation:
+    def read_file(self, requested_path: str | None, start_line: int | None = None, end_line: int | None = None) -> AgentObservation:
 
         self.actions += 1
 
@@ -211,19 +222,32 @@ class InvestigationWorkspace:
             self._record_no_progress(obs)
             return obs
 
-        if path in self.gathered_evidence:
+        if start_line is not None and start_line < 1:
             obs = AgentObservation(
                 action_type="read_file",
                 path=path,
-                result_status="already_read",
-                content=None,
+                result_status="invalid_range",
+                content="start_line must be >= 1",
                 new_evidence_added=False
             )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
+
+        if start_line is not None and end_line is not None and start_line > end_line:
+            obs = AgentObservation(
+                action_type="read_file",
+                path=path,
+                result_status="invalid_range",
+                content="start_line cannot be greater than end_line",
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
             self._record_no_progress(obs)
             return obs
 
         # Budget Check before fetching
-        if len(self.gathered_evidence) >= self.MAX_UNIQUE_FILES:
+        if len(self.gathered_evidence) >= self.MAX_UNIQUE_FILES and path not in self.gathered_evidence:
             obs = AgentObservation(
                 action_type="read_file",
                 path=path,
@@ -251,7 +275,7 @@ class InvestigationWorkspace:
         target_path = self.snapshot.root_path / path
         try:
             with open(target_path, "r", encoding="utf-8") as f:
-                content = f.read()
+                lines = f.readlines()
         except UnicodeDecodeError:
             obs = AgentObservation(
                 action_type="read_file",
@@ -274,23 +298,120 @@ class InvestigationWorkspace:
             self._record_no_progress(obs)
             return obs
 
-        # Truncate
-        retention_limit = min(self.MAX_FILE_CHARS, remaining_capacity)
-        if len(content) > retention_limit:
-            trunc_msg = "\n...[Truncated]"
-            if retention_limit > len(trunc_msg):
-                content = content[:retention_limit - len(trunc_msg)] + trunc_msg
+        total_lines = len(lines)
+        if total_lines == 0:
+            actual_start = 1
+            actual_end = 1
+            selected_lines = []
+            is_truncated_by_bounds = False
+        else:
+            if start_line is None and end_line is None:
+                actual_start = 1
+                if total_lines <= 250:
+                    actual_end = total_lines
+                    is_truncated_by_bounds = False
+                else:
+                    actual_end = 250
+                    is_truncated_by_bounds = True
             else:
-                content = content[:retention_limit]
+                actual_start = max(1, start_line if start_line is not None else 1)
 
-        self.gathered_evidence[path] = content
-        self.total_evidence_chars += len(content)
+                requested_end = end_line if end_line is not None else total_lines
+                # max span is 500
+                actual_end = min(requested_end, actual_start + 500 - 1)
+
+                is_truncated_by_bounds = False
+                if requested_end > actual_end:
+                    is_truncated_by_bounds = True
+
+                # cap to EOF
+                if actual_end > total_lines:
+                    actual_end = total_lines
+                    is_truncated_by_bounds = False
+
+            if actual_start > total_lines:
+                # requested start beyond EOF
+                selected_lines = []
+                actual_end = actual_start
+            else:
+                selected_lines = lines[actual_start - 1 : actual_end]
+
+        raw_content = "".join(selected_lines)
+
+        # Truncate by characters if needed
+        is_truncated_by_chars = False
+        retention_limit = min(self.MAX_FILE_CHARS, remaining_capacity)
+        if len(raw_content) > retention_limit:
+            is_truncated_by_chars = True
+            raw_content = raw_content[:retention_limit]
+
+            # Recalculate actual_end based on truncated content
+            # Count the newlines in the truncated content to see how many lines we actually got
+            lines_in_truncated = raw_content.count('\n')
+            # If the last character isn't a newline but we have content, it's a partial line
+            if len(raw_content) > 0 and not raw_content.endswith('\n'):
+                actual_end = actual_start + lines_in_truncated - 1
+                last_newline_idx = raw_content.rfind('\n')
+                if last_newline_idx != -1:
+                    raw_content = raw_content[:last_newline_idx + 1]
+                else:
+                    raw_content = ""
+                    actual_end = actual_start - 1 # we got 0 complete lines
+            else:
+                actual_end = actual_start + lines_in_truncated - 1
+
+            if actual_end < actual_start:
+                actual_end = actual_start # Ensure valid range even if empty
+
+        # Check for duplicate exact span
+        is_duplicate = False
+        for span in self.evidence_spans:
+            if span.path == path and span.start_line == actual_start and span.end_line == actual_end:
+                is_duplicate = True
+                break
+
+        if is_duplicate:
+            obs = AgentObservation(
+                action_type="read_file",
+                path=path,
+                result_status="already_read",
+                content=None,
+                new_evidence_added=False
+            )
+            self._record_no_progress(obs)
+            return obs
+
+        header = f"[File: {path} | Lines {actual_start}-{actual_end} of {total_lines}]"
+
+        truncated = is_truncated_by_bounds or is_truncated_by_chars
+        if truncated:
+            footer = "\n[Note: File truncated. Use start_line and end_line to read further.]"
+        else:
+            footer = ""
+
+        final_content = f"{header}\n{raw_content}{footer}"
+
+        span = EvidenceSpan(
+            path=path,
+            start_line=actual_start,
+            end_line=actual_end,
+            content=raw_content,
+            source_action_index=len(self.history),
+            truncated=truncated
+        )
+        self.evidence_spans.append(span)
+
+        self.total_evidence_chars += len(final_content)
+        if path not in self.gathered_evidence:
+            self.gathered_evidence[path] = final_content
+        else:
+            self.gathered_evidence[path] += f"\n\n{final_content}"
 
         obs = AgentObservation(
             action_type="read_file",
             path=path,
             result_status="success",
-            content=content,
+            content=final_content,
             new_evidence_added=True
         )
         self.consecutive_no_progress = 0
@@ -715,13 +836,22 @@ class InvestigationWorkspace:
             self._record_no_progress(obs)
             return obs
 
-        # --- 9. Format result (same surface as before) ---
+        # --- 9. Format result (grouped by file) ---
         if not matches:
             content = "No matches found."
             if budget_hit:
                 content += " (Scanning halted due to budget exhaustion)"
         else:
-            lines_out = [f"{m.path}:{m.line_number}: {m.line_text}" for m in matches]
+            grouped_matches: dict[str, list[SearchMatch]] = {}
+            for m in matches:
+                grouped_matches.setdefault(m.path, []).append(m)
+
+            lines_out = []
+            for filepath, file_matches in grouped_matches.items():
+                lines_out.append(filepath)
+                for m in file_matches:
+                    lines_out.append(f"  {m.line_number}: {m.line_text}")
+
             content = "\n".join(lines_out)
             if budget_hit:
                 content += "\n...[Scanning halted due to budget exhaustion]"

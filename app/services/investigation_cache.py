@@ -88,7 +88,7 @@ class InvestigationCache:
                 return None
             if not isinstance(value.get("investigation_result"), dict):
                 return None
-            if not isinstance(value.get("gathered_evidence"), dict):
+            if not isinstance(value.get("evidence_spans"), list):
                 return None
             if value.get("termination_reason") != "model_finished":
                 return None

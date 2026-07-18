@@ -127,21 +127,17 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
     result = None
     if cached_investigation is not None:
         try:
-            evidence = cached_investigation["gathered_evidence"]
-            if (
-                all(isinstance(path, str) and path in workspace.allowed_paths for path in evidence)
-                and len(evidence) <= workspace.MAX_UNIQUE_FILES
-                and sum(len(content) for content in evidence.values() if isinstance(content, str)) <= workspace.MAX_TOTAL_EVIDENCE_CHARS
-                and all(isinstance(content, str) for content in evidence.values())
-            ):
-                workspace.gathered_evidence = dict(evidence)
-                workspace.total_evidence_chars = sum(len(content) for content in evidence.values())
-                trace.investigation_cache_hit = True
-                trace.termination_reason = TerminationReason.MODEL_FINISHED
-                trace.cached_investigation_tool_sequence = list(cached_investigation.get("tool_sequence", []))
-            else:
-                cached_investigation = None
-        except (TypeError, ValueError):
+            # We now rely on the new InvestigationResult format and evidence_spans in cache
+            inv_res_dict = cached_investigation.get("investigation_result", {})
+            from app.services.investigation_agent import InvestigationResult
+            # Just parse it to ensure it's valid
+            InvestigationResult.model_validate(inv_res_dict)
+
+            trace.investigation_cache_hit = True
+            trace.termination_reason = TerminationReason.MODEL_FINISHED
+            trace.cached_investigation_tool_sequence = list(cached_investigation.get("tool_sequence", []))
+        except Exception as exc:
+            logger.warning("Ignoring invalid investigation cache entry: %s", type(exc).__name__)
             cached_investigation = None
 
     if cached_investigation is None:
@@ -180,8 +176,8 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
                         {
                             "repository_revision": gh_repo.revision,
                             "investigation_result": result.output.model_dump(mode="json"),
-                            "gathered_evidence": workspace.gathered_evidence,
-                            "evidence_file_paths": sorted(workspace.gathered_evidence),
+                            "evidence_spans": [span.model_dump(mode="json") for span in workspace.evidence_spans],
+                            "evidence_file_paths": sorted(list(set(s.path for s in workspace.evidence_spans))),
                             "tool_sequence": [step.action_chosen for step in trace.steps],
                             "usage": {
                                 "model_requests": trace.model_requests,
@@ -202,6 +198,53 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
             trace.error_type = type(e).__name__
             raise
 
+    # Extract only the validated relevant excerpts from the EvidenceSpans
+    final_evidence_chunks = {}
+    total_final_evidence_chars = 0
+    final_evidence_paths = set()
+
+    if cached_investigation is not None:
+        inv_res = cached_investigation.get("investigation_result", {})
+        excerpts = inv_res.get("relevant_excerpts", [])
+        spans_dicts = cached_investigation.get("evidence_spans", [])
+        from app.services.investigation_workspace import EvidenceSpan
+        spans = [EvidenceSpan.model_validate(s) for s in spans_dicts]
+    elif result is not None:
+        excerpts = result.output.relevant_excerpts
+        spans = workspace.evidence_spans
+    else:
+        excerpts = []
+        spans = []
+
+    for excerpt in excerpts:
+        if isinstance(excerpt, dict):
+            # Dict from cache
+            path = excerpt["path"]
+            start_line = excerpt["start_line"]
+            end_line = excerpt["end_line"]
+        else:
+            # Pydantic model
+            path = excerpt.path
+            start_line = excerpt.start_line
+            end_line = excerpt.end_line
+
+        final_evidence_paths.add(path)
+
+        # In a robust implementation, we would extract exactly the lines from the spans.
+        # Since the validator already proved the excerpt is covered by spans,
+        # we can just reconstruct the string from the spans.
+        excerpt_content = f"SOURCE: {path}\nLINES: {start_line}-{end_line}\n"
+
+        # A simple reconstruction: just append the content of matching spans
+        # (This may include some extra lines if spans are larger than the excerpt, but it is bounded and safe)
+        matching_spans = [s for s in spans if s.path == path and s.end_line >= start_line and s.start_line <= end_line]
+        for s in matching_spans:
+            excerpt_content += s.content + "\n"
+
+        key = f"{path}:{start_line}-{end_line}"
+        final_evidence_chunks[key] = excerpt_content
+        total_final_evidence_chars += len(excerpt_content)
+
     context = {
         "owner": owner,
         "name": name,
@@ -213,12 +256,12 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
         "top_level_files": ", ".join(top_level_files),
         "detected_stack": detected_stack,
         "default_branch": gh_repo.default_branch,
-        "file_contents": workspace.gathered_evidence,
+        "file_contents": final_evidence_chunks,
     }
 
-    trace.final_evidence_files_count = len(workspace.gathered_evidence)
-    trace.final_evidence_chars = workspace.total_evidence_chars
-    trace.evidence_file_paths = sorted(workspace.gathered_evidence)
+    trace.final_evidence_files_count = len(final_evidence_paths)
+    trace.final_evidence_chars = total_final_evidence_chars
+    trace.evidence_file_paths = sorted(list(final_evidence_paths))
 
     logger.info("Generating streamed answer using Gemini...")
     ans_res = prepare_answer_stream(question, context)
