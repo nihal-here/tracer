@@ -139,8 +139,8 @@ def test_search_code_max_searches_budget(tmp_path: Path):
     snapshot = create_mock_snapshot(tmp_path, files)
     workspace = InvestigationWorkspace(snapshot, allowed_paths=["main.py"])
 
-    for _ in range(InvestigationWorkspace.MAX_SEARCHES):
-        obs = workspace.search_code("foo")
+    for i in range(InvestigationWorkspace.MAX_SEARCHES):
+        obs = workspace.search_code(f"foo{i}")
         assert obs.result_status == "success"
 
     assert workspace.total_searches == InvestigationWorkspace.MAX_SEARCHES

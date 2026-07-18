@@ -233,9 +233,8 @@ def test_malicious_archive_rejection():
             mock_resp.headers = {"Content-Length": "100"}
             mock_resp.iter_content.return_value = [archive_path.read_bytes()]
             mock_get.return_value.__enter__.return_value = mock_resp
-
-            with pytest.raises(RepositoryArchiveUnsafeError, match="Symlinks and hardlinks are not allowed"):
-                snap._do_materialize(archive_path, Path(tmp_dir) / "ext")
+            # It should safely skip the symlink without error
+            snap._do_materialize(archive_path, Path(tmp_dir) / "ext2")
 
 
 def test_malicious_archive_budgets():
@@ -279,8 +278,8 @@ def test_malicious_archive_budgets():
             mock_resp.headers = {"Content-Length": "10"}
             mock_resp.iter_content.return_value = [archive_path.read_bytes()]
             mock_get.return_value.__enter__.return_value = mock_resp
-            with pytest.raises(RepositoryArchiveUnsafeError, match="Symlinks and hardlinks are not allowed"):
-                snap._do_materialize(archive_path, Path(tmp_dir) / "ext2")
+            # It should safely skip the hardlink without error
+            snap._do_materialize(archive_path, Path(tmp_dir) / "ext2")
 
         # 3. Inconsistent top-level prefixes
         with tarfile.open(archive_path, "w:gz") as tar:
@@ -352,3 +351,30 @@ def test_malicious_archive_budgets():
                 mock_get.return_value.__enter__.return_value = mock_resp
                 with pytest.raises(RepositoryArchiveTooLargeError, match="Archive has too many members"):
                     snap._do_materialize(archive_path, Path(tmp_dir) / "ext6")
+
+        # 7. Symlinks and hardlinks are skipped gracefully
+        with tarfile.open(archive_path, "w:gz") as tar:
+            t1 = tarfile.TarInfo("root/file1")
+            t1.type = tarfile.REGTYPE
+            t1.size = 1
+            tar.addfile(t1, io.BytesIO(b"x"))
+            t2 = tarfile.TarInfo("root/sym1")
+            t2.type = tarfile.SYMTYPE
+            t2.linkname = "file1"
+            tar.addfile(t2, io.BytesIO(b""))
+            t3 = tarfile.TarInfo("root/file2")
+            t3.type = tarfile.REGTYPE
+            t3.size = 1
+            tar.addfile(t3, io.BytesIO(b"y"))
+        with patch("app.services.repository_snapshot.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.headers = {"Content-Length": "10"}
+            mock_resp.iter_content.return_value = [archive_path.read_bytes()]
+            mock_get.return_value.__enter__.return_value = mock_resp
+            
+            ext_path = Path(tmp_dir) / "ext7"
+            snap._do_materialize(archive_path, ext_path)
+            assert (ext_path / "file1").exists()
+            assert (ext_path / "file2").exists()
+            assert not (ext_path / "sym1").exists()
+            assert not (ext_path / "sym1").is_symlink()

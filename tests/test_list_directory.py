@@ -293,8 +293,8 @@ def test_list_directory_available_after_search_budget_exhausted(tmp_path: Path):
     workspace = InvestigationWorkspace(snapshot, allowed_paths=["main.py"])
 
     # Exhaust ripgrep budget
-    for _ in range(InvestigationWorkspace.MAX_SEARCHES):
-        workspace.search_code("token")
+    for i in range(InvestigationWorkspace.MAX_SEARCHES):
+        workspace.search_code(f"token{i}")
     assert workspace.total_searches == InvestigationWorkspace.MAX_SEARCHES
 
     # LIST_DIRECTORY still works

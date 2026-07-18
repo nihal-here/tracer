@@ -97,3 +97,93 @@ def test_fatal_domain_termination_handling():
             ))
             
         assert excinfo.value.reason == "consecutive_no_progress"
+
+def test_max_actions_terminates_before_model_requests():
+    """Verify MAX_ACTIONS=8 terminates before MAX_MODEL_REQUESTS=20."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        (root / "main.py").write_text("def foo(): pass")
+        
+        mock_repo = MagicMock()
+        mock_repo.get_readme.return_value = None
+        mock_repo.list_top_level_files.return_value = ["main.py"]
+        
+        mock_snapshot = MagicMock()
+        mock_snapshot.gh_repo = mock_repo
+        mock_snapshot.root_path = root
+        mock_snapshot.extracted_files = frozenset(["main.py"])
+
+        workspace = InvestigationWorkspace(mock_snapshot, allowed_paths=frozenset(["main.py"]))
+        trace = InvestigationTrace(started_at="now", question_chars=10, _start_time=0.0)
+        deps = AgentDeps(workspace=workspace, trace=trace)
+        
+        workspace.MAX_ACTIONS = 8
+        workspace.MAX_CONSECUTIVE_NO_PROGRESS = 100 # Disable this for test
+        
+        # We will simulate the model repeatedly calling read_file
+        def model_func(messages, info):
+            # The model will call read_file infinitely
+            return ModelResponse(parts=[ToolCallPart(tool_name="read_file", args={"file_path": "main.py"})])
+            
+        test_model = FunctionModel(model_func)
+        
+        import asyncio
+        
+        try:
+            from pydantic_ai.usage import UsageLimits
+            asyncio.run(investigation_agent.run(
+                "Read the file 9 times",
+                deps=deps,
+                model=test_model,
+                usage_limits=UsageLimits(request_limit=20)
+            ))
+        except DomainTerminationException as e:
+            trace.termination_reason = TerminationReason(e.reason)
+            
+        assert trace.termination_reason == TerminationReason.MAX_ACTIONS
+        assert workspace.actions == 8
+
+def test_max_actions_terminates_before_model_requests():
+    """Verify MAX_ACTIONS=8 terminates before MAX_MODEL_REQUESTS=20."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        (root / "main.py").write_text("def foo(): pass")
+        
+        mock_repo = MagicMock()
+        mock_repo.get_readme.return_value = None
+        mock_repo.list_top_level_files.return_value = ["main.py"]
+        
+        mock_snapshot = MagicMock()
+        mock_snapshot.gh_repo = mock_repo
+        mock_snapshot.root_path = root
+        mock_snapshot.extracted_files = frozenset(["main.py"])
+
+        workspace = InvestigationWorkspace(mock_snapshot, allowed_paths=frozenset(["main.py"]))
+        trace = InvestigationTrace(started_at="now", question_chars=10, _start_time=0.0)
+        deps = AgentDeps(workspace=workspace, trace=trace)
+        
+        workspace.MAX_ACTIONS = 8
+        workspace.MAX_CONSECUTIVE_NO_PROGRESS = 100 # Disable this for test
+        
+        # We will simulate the model repeatedly calling read_file
+        def model_func(messages, info):
+            # The model will call read_file infinitely
+            return ModelResponse(parts=[ToolCallPart(tool_name="read_file", args={"file_path": "main.py"})])
+            
+        test_model = FunctionModel(model_func)
+        
+        import asyncio
+        
+        try:
+            from pydantic_ai.usage import UsageLimits
+            asyncio.run(investigation_agent.run(
+                "Read the file 9 times",
+                deps=deps,
+                model=test_model,
+                usage_limits=UsageLimits(request_limit=20)
+            ))
+        except DomainTerminationException as e:
+            trace.termination_reason = TerminationReason(e.reason)
+            
+        assert trace.termination_reason == TerminationReason.MAX_ACTIONS
+        assert workspace.actions == 8

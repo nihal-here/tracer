@@ -115,16 +115,22 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
 
         try:
             from pydantic_ai.usage import UsageLimits
-            await investigation_agent.run(
+            MAX_MODEL_REQUESTS = 20
+            result = await investigation_agent.run(
                 prompt,
                 deps=deps,
-                usage_limits=UsageLimits(request_limit=workspace.MAX_ITERATIONS)
+                usage_limits=UsageLimits(request_limit=MAX_MODEL_REQUESTS)
             )
             trace.termination_reason = TerminationReason.MODEL_FINISHED
+            usage = result.usage
+            trace.model_requests = usage.requests
+            trace.input_tokens = usage.input_tokens
+            trace.output_tokens = usage.output_tokens
+            
         except DomainTerminationException as e:
             trace.termination_reason = TerminationReason(e.reason)
         except UnexpectedModelBehavior:
-            trace.termination_reason = TerminationReason.MAX_ITERATIONS
+            trace.termination_reason = TerminationReason.MAX_ACTIONS
 
         if trace.termination_reason is None:
             trace.termination_reason = workspace.get_termination_reason()

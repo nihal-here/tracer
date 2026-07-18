@@ -90,6 +90,7 @@ class RepositorySnapshot:
                 members_count = 0
                 total_extracted_bytes = 0
                 common_prefix = None
+                skipped_symlinks_count = 0
 
                 for tarinfo in tar:
                     members_count += 1
@@ -117,7 +118,8 @@ class RepositorySnapshot:
                         continue
 
                     if tarinfo.issym() or tarinfo.islnk():
-                        raise RepositoryArchiveUnsafeError(f"Symlinks and hardlinks are not allowed: {canonical_name}")
+                        skipped_symlinks_count += 1
+                        continue
 
                     if not tarinfo.isreg():
                         continue
@@ -155,6 +157,9 @@ class RepositorySnapshot:
                             f_out.write(chunk)
 
                     extracted_paths.append(canonical_name)
+
+                if skipped_symlinks_count > 0:
+                    logger.warning(f"Skipped {skipped_symlinks_count} symlink/hardlink entries during repository extraction")
 
         except tarfile.TarError as e:
             raise RepositorySnapshotError(f"Failed to process archive: {e}")

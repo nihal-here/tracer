@@ -23,7 +23,7 @@ def test_workspace_valid_read(tmp_path):
     obs1 = workspace.read_file("valid.py")
     assert obs1.result_status == "success"
     assert obs1.new_evidence_added is True
-    assert workspace.iterations == 0
+    assert workspace.actions == 1
     assert workspace.consecutive_no_progress == 0
     assert obs1.content == "content1"
 
@@ -131,8 +131,8 @@ def test_search_code_max_searches_budget(tmp_path):
     workspace = InvestigationWorkspace(snapshot, allowed_paths=["main.py"])
 
     # Exhaust search budget
-    for _ in range(InvestigationWorkspace.MAX_SEARCHES):
-        _ = workspace.search_code("foo")
+    for i in range(InvestigationWorkspace.MAX_SEARCHES):
+        _ = workspace.search_code(f"foo{i}")
 
     assert workspace.can_continue() is True
 

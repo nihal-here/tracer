@@ -99,7 +99,7 @@ def read_file(ctx: RunContext[AgentDeps], file_path: str) -> str:
     duration = time.perf_counter() - t_start
 
     step_trace = AgentStepTrace(
-        iteration=workspace.iterations,
+        action_number=workspace.actions,
         action_chosen="read_file",
         action_arguments={"file_path": str(len(file_path)) + " chars"}, # Privacy mask
         prompt_chars=0, # Deprecated metric under PydanticAI
@@ -130,7 +130,7 @@ def search_code(ctx: RunContext[AgentDeps], search_query: str, case_sensitive: b
     duration = time.perf_counter() - t_start
 
     step_trace = AgentStepTrace(
-        iteration=workspace.iterations,
+        action_number=workspace.actions,
         action_chosen="search_code",
         action_arguments={
             "search_query_chars": str(len(search_query)),
@@ -161,7 +161,7 @@ def list_directory(ctx: RunContext[AgentDeps], directory_path: str | None = None
     duration = time.perf_counter() - t_start
 
     step_trace = AgentStepTrace(
-        iteration=workspace.iterations,
+        action_number=workspace.actions,
         action_chosen="list_directory",
         action_arguments={
             "directory_path_chars": str(len(directory_path)) if directory_path else "0"

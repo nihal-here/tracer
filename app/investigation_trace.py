@@ -18,7 +18,7 @@ class FailureStage(str, Enum):
 
 class TerminationReason(str, Enum):
     MODEL_FINISHED = "model_finished"
-    MAX_ITERATIONS = "max_iterations"
+    MAX_ACTIONS = "max_actions"
     MAX_UNIQUE_FILES = "max_unique_files"
     MAX_EVIDENCE_CHARS = "max_evidence_chars"
     MAX_INVALID_ACTIONS = "max_invalid_actions"
@@ -29,7 +29,7 @@ class TerminationReason(str, Enum):
 
 @dataclass
 class AgentStepTrace:
-    iteration: int
+    action_number: int
     action_chosen: str
     action_arguments: dict[str, str]
     prompt_chars: int
@@ -55,8 +55,12 @@ class InvestigationTrace:
     final_evidence_files_count: int = 0
     final_evidence_chars: int = 0
     answer_chunks_emitted: int = 0
-    final_prompt_chars: int = 0
-
+    
+    # PydanticAI metrics
+    model_requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    
     termination_reason: TerminationReason | None = None
     failure_stage: FailureStage | None = None
     error_type: str | None = None

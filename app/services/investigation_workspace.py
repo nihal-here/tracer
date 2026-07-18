@@ -103,7 +103,7 @@ def _validate_directory_arg(raw: str | None, root: Path) -> Path | None:
 
 
 class InvestigationWorkspace:
-    MAX_ITERATIONS = 8
+    MAX_ACTIONS = 8
     MAX_UNIQUE_FILES = 8
     MAX_FILE_CHARS = 20_000
     MAX_TOTAL_EVIDENCE_CHARS = 80_000
@@ -121,20 +121,22 @@ class InvestigationWorkspace:
     # ----------------------------
     # LIST_DIRECTORY has NO independent counter.  Every call costs one
     # investigation iteration (enforced by the outer while loop in the
-    # service, which checks can_continue() / MAX_ITERATIONS=8 before each
+    # service, which checks can_continue() / MAX_ACTIONS=8 before each
     # action).  This is the simplest defensible policy because:
     #   - The iteration cap already bounds total LIST_DIRECTORY calls.
     #   - LIST_DIRECTORY is cheap (pure Python over allowed_paths).
     #   - It should NOT consume the MAX_SEARCHES ripgrep budget.
     #   - A separate counter would add complexity without adding safety.
     # Reaching MAX_SEARCHES still allows READ_FILE and LIST_DIRECTORY as
-    # long as MAX_ITERATIONS has not been exhausted.
+    # long as MAX_ACTIONS has not been exhausted.
 
     def __init__(self, snapshot: RepositorySnapshot, allowed_paths: list[str]):
         self.snapshot = snapshot
         self.allowed_paths = frozenset(allowed_paths)
 
-        self.iterations = 0
+        self.actions = 0
+        self.past_searches: set[tuple[str, str | None, bool]] = set()
+        self.past_listings: set[str] = set()
         self.invalid_actions = 0
         self.consecutive_no_progress = 0
         self.total_evidence_chars = 0
@@ -147,7 +149,7 @@ class InvestigationWorkspace:
     def can_continue(self) -> bool:
         if self.is_finished:
             return False
-        if self.iterations >= self.MAX_ITERATIONS:
+        if self.actions >= self.MAX_ACTIONS:
             return False
         if self.invalid_actions >= self.MAX_INVALID_ACTIONS:
             return False
@@ -160,8 +162,8 @@ class InvestigationWorkspace:
         return True
 
     def get_termination_reason(self) -> 'trace_models.TerminationReason | None':
-        if self.iterations >= self.MAX_ITERATIONS:
-            return trace_models.TerminationReason.MAX_ITERATIONS
+        if self.actions >= self.MAX_ACTIONS:
+            return trace_models.TerminationReason.MAX_ACTIONS
         if self.invalid_actions >= self.MAX_INVALID_ACTIONS:
             return trace_models.TerminationReason.MAX_INVALID_ACTIONS
         if self.consecutive_no_progress >= self.MAX_CONSECUTIVE_NO_PROGRESS:
@@ -172,14 +174,16 @@ class InvestigationWorkspace:
             return trace_models.TerminationReason.MAX_EVIDENCE_CHARS
         return None
 
-    def record_iteration(self):
-        self.iterations += 1
+    def record_action(self):
+        self.actions += 1
 
     # -------------------------------------------------------------------------
     # READ_FILE
     # -------------------------------------------------------------------------
 
     def read_file(self, requested_path: str | None) -> AgentObservation:
+
+        self.actions += 1
 
         if not requested_path:
             obs = AgentObservation(
@@ -298,6 +302,7 @@ class InvestigationWorkspace:
     # -------------------------------------------------------------------------
 
     def list_directory(self, requested_path: str | None) -> AgentObservation:
+        self.actions += 1
         """
         Return the immediate children of a repository-relative directory.
 
@@ -463,6 +468,7 @@ class InvestigationWorkspace:
         case_sensitive: bool = False,
         target_directory: str | None = None,
     ) -> AgentObservation:
+        self.actions += 1
         """
         Search for literal occurrences of *query* in the repository using
         ripgrep.  Results are filtered to the workspace's ``allowed_paths``
@@ -488,7 +494,7 @@ class InvestigationWorkspace:
         if not query:
             obs = AgentObservation(
                 action_type="search_code",
-                path=None,
+                path=target_directory,
                 result_status="invalid_query",
                 content=None,
                 new_evidence_added=False
@@ -496,6 +502,19 @@ class InvestigationWorkspace:
             self.invalid_actions += 1
             self._record_no_progress(obs)
             return obs
+
+        search_key = (query, target_directory, case_sensitive)
+        if search_key in self.past_searches:
+            obs = AgentObservation(
+                action_type="search_code",
+                path=target_directory,
+                result_status="already_searched",
+                content=None,
+                new_evidence_added=False
+            )
+            self._record_no_progress(obs)
+            return obs
+        self.past_searches.add(search_key)
 
         # --- 2. Budget gate ---
         if self.total_searches >= self.MAX_SEARCHES:
