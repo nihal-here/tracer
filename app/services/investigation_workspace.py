@@ -1,8 +1,26 @@
 from dataclasses import dataclass
 from typing import Optional
 from app.services.repository_snapshot import RepositorySnapshot
-import re
+import json
+import logging
+import shutil
+import subprocess
 import app.investigation_trace as trace_models
+from pathlib import Path, PurePosixPath
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Ripgrep output-bound constants
+# ---------------------------------------------------------------------------
+# Maximum number of raw stdout lines we will read from a single ripgrep
+# invocation.  This is the *genuine* memory bound: we use subprocess.Popen
+# and read line-by-line, stopping early rather than collecting all stdout
+# first.  At ~400 bytes/line and 10 000 lines this caps at ~4 MB; in
+# practice we stop much earlier once MAX_SEARCH_RESULTS match-lines are
+# accumulated.
+_RG_MAX_STDOUT_LINES = 10_000
+
 
 @dataclass
 class AgentObservation:
@@ -12,11 +30,77 @@ class AgentObservation:
     content: Optional[str]
     new_evidence_added: bool
 
+
 @dataclass
 class SearchMatch:
     path: str
     line_number: int
     line_text: str
+
+
+def _rg_binary() -> str:
+    """Return the path to the ripgrep binary, or raise if unavailable."""
+    rg = shutil.which("rg")
+    if rg is None:
+        raise FileNotFoundError(
+            "ripgrep (rg) is not available on PATH. "
+            "Install it (e.g. brew install ripgrep) to use search_code."
+        )
+    return rg
+
+
+# ---------------------------------------------------------------------------
+# Directory-path validation helper (shared by search_code and list_directory)
+# ---------------------------------------------------------------------------
+
+def _validate_directory_arg(raw: str | None, root: Path) -> Path | None:
+    """
+    Validate *raw* as a repository-relative directory path.
+
+    Returns
+    -------
+    None
+        When *raw* is None, ``""`` or ``"."`` — callers should use repo root.
+    Path
+        Resolved absolute path inside *root*.
+
+    Raises
+    ------
+    ValueError
+        For absolute paths, ``..`` traversal, or paths that escape *root*.
+    """
+    if raw is None:
+        return None
+
+    stripped = raw.strip().rstrip("/")
+
+    if stripped in ("", "."):
+        return None
+
+    if stripped.startswith("/"):
+        raise ValueError(
+            f"Path must be repository-relative, not absolute: {raw!r}"
+        )
+
+    try:
+        pure = PurePosixPath(stripped)
+    except Exception:
+        raise ValueError(f"Path is not valid: {raw!r}")
+
+    for part in pure.parts:
+        if part == "..":
+            raise ValueError(
+                f"Path must not contain '..' traversal: {raw!r}"
+            )
+
+    candidate = (root / stripped).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ValueError(f"Path escapes the repository root: {raw!r}")
+
+    return candidate
+
 
 class InvestigationWorkspace:
     MAX_ITERATIONS = 8
@@ -26,12 +110,25 @@ class InvestigationWorkspace:
     MAX_INVALID_ACTIONS = 3
     MAX_CONSECUTIVE_NO_PROGRESS = 2
 
-    # Phase 6 Search Budgets
+    # Search Budgets
     MAX_SEARCHES = 4
     MAX_SEARCH_RESULTS = 50
     MAX_RESULT_LINE_CHARS = 200
-    MAX_FILES_SCANNED_PER_SEARCH = 2_000
-    MAX_BYTES_SCANNED_PER_SEARCH = 50_000_000
+    # Per-file size limit passed to ripgrep (--max-filesize).
+    MAX_FILE_SIZE_BYTES = 10_485_760  # 10 MiB per file
+
+    # LIST_DIRECTORY budget policy
+    # ----------------------------
+    # LIST_DIRECTORY has NO independent counter.  Every call costs one
+    # investigation iteration (enforced by the outer while loop in the
+    # service, which checks can_continue() / MAX_ITERATIONS=8 before each
+    # action).  This is the simplest defensible policy because:
+    #   - The iteration cap already bounds total LIST_DIRECTORY calls.
+    #   - LIST_DIRECTORY is cheap (pure Python over allowed_paths).
+    #   - It should NOT consume the MAX_SEARCHES ripgrep budget.
+    #   - A separate counter would add complexity without adding safety.
+    # Reaching MAX_SEARCHES still allows READ_FILE and LIST_DIRECTORY as
+    # long as MAX_ITERATIONS has not been exhausted.
 
     def __init__(self, snapshot: RepositorySnapshot, allowed_paths: list[str]):
         self.snapshot = snapshot
@@ -77,6 +174,10 @@ class InvestigationWorkspace:
 
     def record_iteration(self):
         self.iterations += 1
+
+    # -------------------------------------------------------------------------
+    # READ_FILE
+    # -------------------------------------------------------------------------
 
     def read_file(self, requested_path: str | None) -> AgentObservation:
 
@@ -192,7 +293,198 @@ class InvestigationWorkspace:
         self.history.append(obs)
         return obs
 
-    def search_code(self, query: str | None, case_sensitive: bool = False) -> AgentObservation:
+    # -------------------------------------------------------------------------
+    # LIST_DIRECTORY
+    # -------------------------------------------------------------------------
+
+    def list_directory(self, requested_path: str | None) -> AgentObservation:
+        """
+        Return the immediate children of a repository-relative directory.
+
+        The listing is derived purely from ``allowed_paths`` — no filesystem
+        traversal is performed.  Only files and directories visible through
+        the workspace's allowed-paths set are returned.
+
+        Budget
+        ------
+        LIST_DIRECTORY consumes one investigation iteration (enforced by the
+        caller's loop) but does NOT consume MAX_SEARCHES or add to
+        gathered_evidence / total_evidence_chars.
+
+        Parameters
+        ----------
+        requested_path:
+            Repository-relative directory path.  None, ``""``, and ``"."``
+            mean the repository root.  Trailing slashes are stripped.
+            Absolute paths and ``..`` traversal are rejected.
+        """
+        # Validate the path argument
+        assert self.snapshot.root_path is not None
+        root = self.snapshot.root_path.resolve()
+
+        try:
+            scope_abs = _validate_directory_arg(requested_path, root)
+        except ValueError as exc:
+            obs = AgentObservation(
+                action_type="list_directory",
+                path=None,
+                result_status="invalid_path",
+                content=str(exc),
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
+
+        # Determine the normalised logical prefix we need to match.
+        # scope_abs is None  → root listing: prefix = ""
+        # scope_abs is Path  → sub-directory: prefix = "auth/strategy" (no trailing slash)
+        if scope_abs is None:
+            logical_prefix = ""
+        else:
+            try:
+                logical_prefix = str(scope_abs.relative_to(root))
+            except ValueError:
+                # Should never happen given _validate_directory_arg passed
+                obs = AgentObservation(
+                    action_type="list_directory",
+                    path=None,
+                    result_status="invalid_path",
+                    content="Path resolution error.",
+                    new_evidence_added=False
+                )
+                self.invalid_actions += 1
+                self._record_no_progress(obs)
+                return obs
+
+        # Enumerate immediate children from allowed_paths
+        # A child is a path that:
+        #   - starts with (prefix + "/")  OR  is a root file (prefix == "")
+        #   - the portion after the prefix contains exactly one path component
+        #     (immediate child, not a descendant)
+        child_dirs: set[str] = set()
+        child_files: set[str] = set()
+
+        prefix_with_slash = (logical_prefix + "/") if logical_prefix else ""
+        prefix_len = len(prefix_with_slash)
+
+        for ap in self.allowed_paths:
+            if logical_prefix:
+                # Must start with the prefix + separator
+                if not ap.startswith(prefix_with_slash):
+                    continue
+                remainder = ap[prefix_len:]
+            else:
+                # Root listing
+                remainder = ap
+
+            # remainder should never be empty for a valid path, but guard
+            if not remainder:
+                continue
+
+            slash_pos = remainder.find("/")
+            if slash_pos == -1:
+                # Direct file child
+                child_files.add(remainder)
+            else:
+                # Subdirectory child
+                child_dirs.add(remainder[:slash_pos] + "/")
+
+        # Check: if the requested path corresponds to a file in allowed_paths,
+        # reject it immediately as "not a directory" regardless of children.
+        if logical_prefix and logical_prefix in self.allowed_paths:
+            obs = AgentObservation(
+                action_type="list_directory",
+                path=requested_path,
+                result_status="not_a_directory",
+                content=f"{logical_prefix!r} is a file, not a directory.",
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
+
+        # If no children were found for a non-root scope, it means the directory
+        # either doesn't exist or has no allowed files under it.
+        if logical_prefix and not child_dirs and not child_files:
+            obs = AgentObservation(
+                action_type="list_directory",
+                path=requested_path,
+                result_status="not_found",
+                content=f"No entries found for directory: {logical_prefix!r}",
+                new_evidence_added=False
+            )
+            # not_found is not an invalid action (valid operation, no such dir)
+            self._record_no_progress(obs)
+            return obs
+
+        # Format output
+        sorted_dirs = sorted(child_dirs)
+        sorted_files = sorted(child_files)
+
+        output_lines: list[str] = []
+        if sorted_dirs:
+            output_lines.append("Directories:")
+            output_lines.extend(f"  {d}" for d in sorted_dirs)
+        if sorted_files:
+            output_lines.append("Files:")
+            output_lines.extend(f"  {f}" for f in sorted_files)
+
+        if not output_lines:
+            # Root listing with zero allowed paths — empty repository
+            content = "(empty)"
+        else:
+            content = "\n".join(output_lines)
+
+        entries_count = len(child_dirs) + len(child_files)
+
+        obs = AgentObservation(
+            action_type="list_directory",
+            path=requested_path,
+            result_status="success",
+            content=content,
+            new_evidence_added=True,  # Counts as forward progress
+        )
+        # Store entry count as extra metadata in the observation for tracing.
+        # We tag it on as an attribute so the trace layer can access it without
+        # parsing the content string.
+        object.__setattr__(obs, "_entries_count", entries_count) # pyright: ignore
+        self.consecutive_no_progress = 0
+        self.history.append(obs)
+        return obs
+
+    # -------------------------------------------------------------------------
+    # SEARCH_CODE (ripgrep-backed)
+    # -------------------------------------------------------------------------
+
+    def search_code(
+        self,
+        query: str | None,
+        case_sensitive: bool = False,
+        target_directory: str | None = None,
+    ) -> AgentObservation:
+        """
+        Search for literal occurrences of *query* in the repository using
+        ripgrep.  Results are filtered to the workspace's ``allowed_paths``
+        set so ripgrep cannot surface files outside the workspace boundary.
+
+        The subprocess is run via ``subprocess.Popen`` with line-by-line
+        reading so that unbounded stdout is never fully buffered in memory.
+        Reading stops as soon as ``MAX_SEARCH_RESULTS`` match records have
+        been collected or ``_RG_MAX_STDOUT_LINES`` raw lines have been read
+        (whichever comes first), then the process is killed.
+
+        Parameters
+        ----------
+        query:
+            Literal string to search for.  Must not be None or empty.
+        case_sensitive:
+            When True, the search is case-sensitive.  Default is False.
+        target_directory:
+            Optional repository-relative directory path.  None / ``""`` /
+            ``"."`` → search the entire repository root.
+        """
+        # --- 1. Empty / invalid query ---
         if not query:
             obs = AgentObservation(
                 action_type="search_code",
@@ -205,6 +497,7 @@ class InvestigationWorkspace:
             self._record_no_progress(obs)
             return obs
 
+        # --- 2. Budget gate ---
         if self.total_searches >= self.MAX_SEARCHES:
             obs = AgentObservation(
                 action_type="search_code",
@@ -216,88 +509,202 @@ class InvestigationWorkspace:
             self._record_no_progress(obs)
             return obs
 
+        # --- 3. Validate target_directory BEFORE consuming the budget slot ---
+        assert self.snapshot.root_path is not None
+        repo_root = self.snapshot.root_path.resolve()
+
+        try:
+            scope_path = _validate_directory_arg(target_directory, repo_root)
+        except ValueError as exc:
+            obs = AgentObservation(
+                action_type="search_code",
+                path=None,
+                result_status="invalid_scope",
+                content=str(exc),
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
+
+        # --- 4. Check ripgrep availability ---
+        try:
+            rg = _rg_binary()
+        except FileNotFoundError as exc:
+            obs = AgentObservation(
+                action_type="search_code",
+                path=None,
+                result_status="search_engine_unavailable",
+                content=str(exc),
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
+
+        # --- 5. Budget consumed ---
         self.total_searches += 1
 
-        matches = []
-        files_scanned = 0
-        bytes_scanned = 0
-        budget_exhausted = False
+        # --- 6. Determine search root ---
+        # If a valid scope was given but does not exist, return zero results
+        # without running ripgrep (avoids confusing error output).
+        if scope_path is not None and not scope_path.exists():
+            obs = AgentObservation(
+                action_type="search_code",
+                path=None,
+                result_status="success",
+                content="No matches found.",
+                new_evidence_added=True,
+            )
+            self.consecutive_no_progress = 0
+            self.history.append(obs)
+            return obs
 
-        flags = 0 if case_sensitive else re.IGNORECASE
-        escaped_query = re.escape(query)
-        pattern = re.compile(escaped_query, flags)
+        search_target = str(scope_path) if scope_path is not None else str(repo_root)
 
-        for path in self.allowed_paths:
-            if files_scanned >= self.MAX_FILES_SCANNED_PER_SEARCH:
-                budget_exhausted = True
-                break
-            if bytes_scanned >= self.MAX_BYTES_SCANNED_PER_SEARCH:
-                budget_exhausted = True
-                break
-            if len(matches) >= self.MAX_SEARCH_RESULTS:
-                budget_exhausted = True
-                break
+        # --- 7. Build ripgrep argument list (no shell=True) ---
+        cmd: list[str] = [
+            rg,
+            "--json",                          # machine-readable output
+            "--fixed-strings",                 # literal match (no regex injection)
+            "--max-count", str(self.MAX_SEARCH_RESULTS),   # per-file match cap
+            "--max-filesize", str(self.MAX_FILE_SIZE_BYTES),
+            "--no-ignore",                     # respect workspace, not .gitignore
+            "--hidden",                        # don't skip dotfiles
+        ]
+        if not case_sensitive:
+            cmd.append("--ignore-case")
+        cmd += ["--", query, search_target]
 
-            files_scanned += 1
-            assert self.snapshot.root_path is not None
-            target_path = self.snapshot.root_path / path
+        # --- 8. Run ripgrep with *genuine* bounded output ---
+        # We use Popen + line-by-line reading so we never allocate more than
+        # O(lines_read) bytes regardless of total ripgrep output size.
+        matches: list[SearchMatch] = []
+        budget_hit = False
+        stderr_bytes = b""
 
+        proc: subprocess.Popen[bytes] | None = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert proc.stdout is not None
+
+            lines_read = 0
+            for raw_line in proc.stdout:
+                lines_read += 1
+                if lines_read > _RG_MAX_STDOUT_LINES:
+                    budget_hit = True
+                    break
+
+                raw_line = raw_line.rstrip(b"\n")
+                if not raw_line:
+                    continue
+
+                try:
+                    record = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if record.get("type") != "match":
+                    continue
+
+                data = record.get("data", {})
+
+                # Absolute path from ripgrep → make relative to repo_root
+                path_field = data.get("path", {})
+                abs_path_str: str | None = path_field.get("text")
+                if abs_path_str is None:
+                    continue
+
+                try:
+                    rel_path = str(Path(abs_path_str).resolve().relative_to(repo_root))
+                except ValueError:
+                    continue
+
+                # Workspace containment: only emit paths the workspace allows
+                if rel_path not in self.allowed_paths:
+                    continue
+
+                line_number: int = data.get("line_number", 0)
+
+                # lines field is either {"text": "..."} or {"bytes": "<base64>"}
+                lines_field = data.get("lines", {})
+                line_text_raw: str
+                if "text" in lines_field:
+                    line_text_raw = lines_field["text"]
+                else:
+                    # Non-UTF-8 line: fall back to a safe placeholder
+                    line_text_raw = "<binary line>"
+
+                line_text = line_text_raw.rstrip("\n").rstrip("\r")
+                if len(line_text) > self.MAX_RESULT_LINE_CHARS:
+                    line_text = line_text[:self.MAX_RESULT_LINE_CHARS] + "..."
+
+                matches.append(SearchMatch(path=rel_path, line_number=line_number, line_text=line_text))
+
+                if len(matches) >= self.MAX_SEARCH_RESULTS:
+                    budget_hit = True
+                    break
+
+            # Kill the process if we stopped reading early (budget_hit),
+            # then collect stderr for error detection.
+            if hasattr(proc.stdout, "close"):
+                proc.stdout.close()
             try:
-                with open(target_path, "rb") as f:
-                    line_number = 1
-                    while True:
-                        remaining_budget = self.MAX_BYTES_SCANNED_PER_SEARCH - bytes_scanned
-                        if remaining_budget <= 0:
-                            budget_exhausted = True
-                            break
+                proc.kill()
+            except ProcessLookupError:
+                pass  # already exited
+            _, stderr_bytes = proc.communicate(timeout=5)
+            returncode = proc.returncode
 
-                        line_bytes = f.readline(remaining_budget)
-                        if not line_bytes:
-                            break
+        except OSError as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass
+            logger.error("ripgrep execution failed: %s", exc)
+            obs = AgentObservation(
+                action_type="search_code",
+                path=None,
+                result_status="search_engine_error",
+                content=f"ripgrep execution error: {exc}",
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
 
-                        is_partial = False
-                        if len(line_bytes) == remaining_budget and not line_bytes.endswith(b'\n'):
-                            # Peek to see if we actually ran out of file, or just ran out of budget
-                            next_byte = f.read(1)
-                            if next_byte:
-                                is_partial = True
-                                budget_exhausted = True
+        # rg exit codes: 0 = matches found, 1 = no matches, 2 = error
+        # (We kill the process on budget_hit so rc may be non-zero; only treat
+        # rc=2 as an error when we did NOT stop early ourselves.)
+        if returncode == 2 and not budget_hit and not matches:
+            stderr_snippet = stderr_bytes[:200].decode("utf-8", errors="replace")
+            logger.error("ripgrep error (rc=2): %s", stderr_snippet)
+            obs = AgentObservation(
+                action_type="search_code",
+                path=None,
+                result_status="search_engine_error",
+                content=f"ripgrep error: {stderr_snippet}",
+                new_evidence_added=False
+            )
+            self.invalid_actions += 1
+            self._record_no_progress(obs)
+            return obs
 
-                        bytes_scanned += len(line_bytes)
-
-                        if is_partial:
-                            break
-
-                        try:
-                            line_str = line_bytes.decode("utf-8")
-                            if pattern.search(line_str):
-                                line_text = line_str.strip()
-                                if len(line_text) > self.MAX_RESULT_LINE_CHARS:
-                                    line_text = line_text[:self.MAX_RESULT_LINE_CHARS] + "..."
-
-                                matches.append(SearchMatch(path=path, line_number=line_number, line_text=line_text))
-
-                                if len(matches) >= self.MAX_SEARCH_RESULTS:
-                                    budget_exhausted = True
-                                    break
-                        except UnicodeDecodeError:
-                            # Abort searching this file if it contains invalid utf-8 (binary)
-                            break
-
-                        line_number += 1
-
-            except OSError:
-                pass # skip unreadable files silently
-
-        # Format the result content
+        # --- 9. Format result (same surface as before) ---
         if not matches:
             content = "No matches found."
-            if budget_exhausted:
+            if budget_hit:
                 content += " (Scanning halted due to budget exhaustion)"
         else:
-            lines = [f"{m.path}:{m.line_number}: {m.line_text}" for m in matches]
-            content = "\n".join(lines)
-            if budget_exhausted:
+            lines_out = [f"{m.path}:{m.line_number}: {m.line_text}" for m in matches]
+            content = "\n".join(lines_out)
+            if budget_hit:
                 content += "\n...[Scanning halted due to budget exhaustion]"
 
         obs = AgentObservation(
@@ -305,7 +712,7 @@ class InvestigationWorkspace:
             path=None,
             result_status="success",
             content=content,
-            new_evidence_added=True # Treat searches as progress
+            new_evidence_added=True  # Treat searches as progress
         )
         self.consecutive_no_progress = 0
         self.history.append(obs)

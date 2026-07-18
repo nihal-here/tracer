@@ -11,6 +11,7 @@ Trace is a high-performance, AI-powered investigation tool that allows you to in
 
 ### Prerequisites
 - Python 3.10+
+- `ripgrep` installed on your system (e.g. `brew install ripgrep` or `apt-get install ripgrep`)
 - A Google Gemini API Key
 - A GitHub Personal Access Token (for increased rate limits)
 

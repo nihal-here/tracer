@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 import logging
 import json
 from dataclasses import asdict
-from typing import Iterator
+from typing import Iterator, AsyncIterator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,15 +29,15 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def serve_frontend():
     return FileResponse("static/index.html")
 
-def _sse_adapter(events: Iterator[InvestigationEvent]):
-    for event in events:
+async def _sse_adapter(events: AsyncIterator[InvestigationEvent]):
+    async for event in events:
         if isinstance(event, InvestigationMetadata):
             yield f"data: {json.dumps({'metadata': asdict(event)})}\n\n"
         elif isinstance(event, InvestigationAnswerChunk):
             yield f"data: {json.dumps({'chunk': event.chunk})}\n\n"
 
 @app.post("/investigate")
-def investigate(request: InvestigateRequest):
+async def investigate(request: InvestigateRequest):
     trace = InvestigationTrace(
         started_at=datetime.now(timezone.utc).isoformat(),
         question_chars=len(request.question),
@@ -65,9 +65,10 @@ def investigate(request: InvestigateRequest):
         emit_trace(trace)
         raise
 
-    def event_generator():
+    async def event_generator():
         try:
-            yield from run_investigation(snapshot, request.question, trace)
+            async for event in run_investigation(snapshot, request.question, trace):
+                yield event
         finally:
             emit_trace(trace)
             snapshot.cleanup()

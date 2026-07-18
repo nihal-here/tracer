@@ -30,14 +30,14 @@ class TerminationReason(str, Enum):
 @dataclass
 class AgentStepTrace:
     iteration: int
-    decision_duration_sec: float
     action_chosen: str
     action_arguments: dict[str, str]
     prompt_chars: int
     history_chars: int
-    allowed_paths_chars: int
-    execution_duration_sec: float
+    repo_map_chars: int
     search_results_count: int | None = None
+    decision_duration_sec: float | None = None
+    execution_duration_sec: float | None = None
 
 
 @dataclass

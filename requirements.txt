@@ -5,3 +5,4 @@ google-genai
 python-dotenv
 pytest
 httpx
+pydantic-ai

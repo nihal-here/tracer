@@ -1,5 +1,5 @@
 import logging
-from typing import Iterator
+from typing import Iterator, AsyncIterator
 
 from app.models import ContextResponse, ReadmeResponse
 from app.investigation_events import (
@@ -11,6 +11,7 @@ from app.investigation_events import (
 )
 from app.services.answer_service import prepare_answer_stream
 from app.services.investigation_workspace import InvestigationWorkspace
+from app.services.repo_map import build_repo_map
 from app.investigation_trace import (
     InvestigationTrace,
     AgentStepTrace,
@@ -20,7 +21,8 @@ from app.investigation_trace import (
 )
 import time
 from app.services.repository_snapshot import RepositorySnapshot
-from app.services.investigation_agent import choose_next_action, ActionType
+from app.services.investigation_agent import investigation_agent, AgentDeps, DomainTerminationException
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from app.services.github import (
     GitHubRepository,
     GitHubError,
@@ -65,7 +67,7 @@ def github_error_boundary():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def run_investigation(snapshot: RepositorySnapshot, question: str, trace: InvestigationTrace) -> Iterator[InvestigationEvent]:
+async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: InvestigationTrace) -> AsyncIterator[InvestigationEvent]:
     gh_repo = snapshot.gh_repo
     url_str = f"https://github.com/{gh_repo.owner}/{gh_repo.name}"
     logger.info("--- Starting Investigation ---")
@@ -90,6 +92,9 @@ def run_investigation(snapshot: RepositorySnapshot, question: str, trace: Invest
     clean_tree = filter_noise(raw_tree)
     workspace = InvestigationWorkspace(snapshot, clean_tree)
 
+    # Build the hierarchical repository map once before the investigation loop.
+    repo_map = build_repo_map(workspace.allowed_paths)
+
     yield InvestigationMetadata(
         repo=url_str,
         provider="github",
@@ -105,51 +110,21 @@ def run_investigation(snapshot: RepositorySnapshot, question: str, trace: Invest
     )
 
     try:
-        while workspace.can_continue():
-            t_start = time.perf_counter()
-            decision_result = choose_next_action(question, workspace.allowed_paths, workspace.history)
-            action = decision_result.action
-            decision_duration = time.perf_counter() - t_start
+        deps = AgentDeps(workspace=workspace, trace=trace)
+        prompt = f"Repository map:\n{repo_map}\n\nQuestion: {question}"
 
-            workspace.record_iteration()
-
-            step_trace = AgentStepTrace(
-                iteration=workspace.iterations,
-                decision_duration_sec=decision_duration,
-                action_chosen=action.action_type,
-                action_arguments={},
-                prompt_chars=decision_result.prompt_chars,
-                history_chars=decision_result.history_chars,
-                allowed_paths_chars=decision_result.allowed_paths_chars,
-                execution_duration_sec=0.0
+        try:
+            from pydantic_ai.usage import UsageLimits
+            await investigation_agent.run(
+                prompt,
+                deps=deps,
+                usage_limits=UsageLimits(request_limit=workspace.MAX_ITERATIONS)
             )
-
-            if action.action_type == ActionType.FINISH:
-                trace.termination_reason = TerminationReason.MODEL_FINISHED
-                trace.steps.append(step_trace)
-                break
-
-            elif action.action_type == ActionType.READ_FILE:
-                step_trace.action_arguments["file_path"] = bound_trace_string(action.file_path)
-
-                t_exec_start = time.perf_counter()
-                observation = workspace.read_file(action.file_path)
-                step_trace.execution_duration_sec = time.perf_counter() - t_exec_start
-
-                if observation.new_evidence_added:
-                    assert observation.path is not None
-                    yield InvestigationFileRead(path=observation.path, chars_read=len(observation.content or ""), cached=False)
-
-            elif action.action_type == ActionType.SEARCH_CODE:
-                step_trace.action_arguments["search_query_chars"] = str(len(action.search_query)) if action.search_query else "0"
-                step_trace.action_arguments["case_sensitive"] = str(action.case_sensitive)
-
-                t_exec_start = time.perf_counter()
-                observation = workspace.search_code(action.search_query, action.case_sensitive)
-                step_trace.execution_duration_sec = time.perf_counter() - t_exec_start
-                # You could extract search_results_count from observation.content if needed, but we'll leave it simple
-
-            trace.steps.append(step_trace)
+            trace.termination_reason = TerminationReason.MODEL_FINISHED
+        except DomainTerminationException as e:
+            trace.termination_reason = TerminationReason(e.reason)
+        except UnexpectedModelBehavior:
+            trace.termination_reason = TerminationReason.MAX_ITERATIONS
 
         if trace.termination_reason is None:
             trace.termination_reason = workspace.get_termination_reason()

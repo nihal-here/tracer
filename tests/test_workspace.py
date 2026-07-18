@@ -107,19 +107,22 @@ def test_search_code_limits(tmp_path):
     assert "Scanning halted due to budget exhaustion" in obs.content
     assert obs.content.count("main.py:") == InvestigationWorkspace.MAX_SEARCH_RESULTS
 
-def test_search_code_budget_exhausts_mid_line(tmp_path):
-    class SmallBudgetWorkspace(InvestigationWorkspace):
-        MAX_BYTES_SCANNED_PER_SEARCH = 10
+def test_search_code_oversized_file_skipped(tmp_path):
+    """Files exceeding MAX_FILE_SIZE_BYTES are skipped by ripgrep (--max-filesize)."""
+    class SmallFileSizeWorkspace(InvestigationWorkspace):
+        MAX_FILE_SIZE_BYTES = 10  # only 10 bytes allowed per file
 
-    files = {"long_line.txt": "123456789012345find_me"}
+    # File is larger than the limit → ripgrep will skip it
+    files = {"big.txt": "123456789012345find_me"}
     snapshot = create_mock_snapshot(tmp_path, files)
 
-    workspace = SmallBudgetWorkspace(snapshot, allowed_paths=["long_line.txt"])
+    workspace = SmallFileSizeWorkspace(snapshot, allowed_paths=["big.txt"])
     obs = workspace.search_code("find_me")
 
+    assert obs.result_status == "success"
     assert obs.content is not None
+    # ripgrep skipped the file → no matches
     assert "No matches found." in obs.content
-    assert "Scanning halted due to budget exhaustion" in obs.content
     assert workspace.total_searches == 1
 
 def test_search_code_max_searches_budget(tmp_path):
@@ -129,7 +132,7 @@ def test_search_code_max_searches_budget(tmp_path):
 
     # Exhaust search budget
     for _ in range(InvestigationWorkspace.MAX_SEARCHES):
-        workspace.search_code("foo")
+        _ = workspace.search_code("foo")
 
     assert workspace.can_continue() is True
 
