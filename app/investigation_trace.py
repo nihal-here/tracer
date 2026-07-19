@@ -28,6 +28,31 @@ class TerminationReason(str, Enum):
 
 
 @dataclass
+class ReadFileTraceMetadata:
+    requested_path: str
+    requested_start_line: int | None
+    requested_end_line: int | None
+    actual_start_line: int | None
+    actual_end_line: int | None
+    total_file_lines: int | None
+    truncated: bool | None
+    returned_chars: int | None
+
+@dataclass
+class SearchCodeTraceMetadata:
+    query: str
+    scope: str | None
+    case_sensitive: bool
+    matches_returned: int | None
+    returned_chars: int | None
+
+@dataclass
+class ListDirectoryTraceMetadata:
+    directory_path: str
+    entries_returned: int | None
+    returned_chars: int | None
+
+@dataclass
 class AgentStepTrace:
     action_number: int
     action_chosen: str
@@ -38,6 +63,9 @@ class AgentStepTrace:
     search_results_count: int | None = None
     decision_duration_sec: float | None = None
     execution_duration_sec: float | None = None
+    read_file_metadata: ReadFileTraceMetadata | None = None
+    search_code_metadata: SearchCodeTraceMetadata | None = None
+    list_directory_metadata: ListDirectoryTraceMetadata | None = None
 
 
 @dataclass
@@ -62,16 +90,22 @@ class InvestigationTrace:
     repository_resolution_duration_sec: float = 0.0
     materialization_duration_sec: float = 0.0
     total_duration_sec: float = 0.0
-    answer_generation_duration_sec: float = 0.0
+    answer_generation_duration_sec: float | None = None
 
     steps: list[AgentStepTrace] = field(default_factory=list)
 
     final_evidence_files_count: int = 0
-    final_evidence_chars: int = 0
+    final_evidence_chars: int = 0 # Deprecated/Replaced below
     evidence_file_paths: list[str] = field(default_factory=list)
     cached_investigation_tool_sequence: list[str] = field(default_factory=list)
     answer_chunks_emitted: int = 0
-    
+
+    # Phase F Observability
+    observed_evidence_chars: int = 0
+    observed_evidence_spans_count: int = 0
+    relevant_excerpts_count: int = 0
+    final_selected_evidence_chars: int = 0
+
     # PydanticAI metrics
     model_requests: int = 0
     input_tokens: int = 0
@@ -84,7 +118,7 @@ class InvestigationTrace:
     repository_snapshot_cache_hit: bool = False
     repository_cache_lookup_duration_sec: float = 0.0
     final_prompt_chars: int = 0
-    
+
     termination_reason: TerminationReason | None = None
     failure_stage: FailureStage | None = None
     error_type: str | None = None
@@ -111,9 +145,9 @@ def _dataclass_to_dict_safe(obj: Any) -> dict[str, Any]:
     for field_name in obj.__dataclass_fields__:
         if field_name.startswith("_"):
             continue
-        
+
         value = getattr(obj, field_name)
-        
+
         if is_dataclass(value):
             result[field_name] = _dataclass_to_dict_safe(value)
         elif isinstance(value, list) and all(is_dataclass(v) for v in value):

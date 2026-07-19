@@ -10,6 +10,7 @@ from app.investigation_events import (
     InvestigationCompleted
 )
 from app.services.answer_service import prepare_answer_stream
+from app.services.evidence_reconstruction import reconstruct_evidence_text
 from app.services.investigation_workspace import InvestigationWorkspace
 from app.services.repo_map import build_repo_map
 from app.investigation_trace import (
@@ -67,7 +68,12 @@ def github_error_boundary():
         raise HTTPException(status_code=502, detail=str(e))
 
 
-async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: InvestigationTrace) -> AsyncIterator[InvestigationEvent]:
+async def run_investigation(
+    snapshot: RepositorySnapshot,
+    question: str,
+    trace: InvestigationTrace,
+    max_actions: int | None = None
+) -> AsyncIterator[InvestigationEvent]:
     gh_repo = snapshot.gh_repo
     url_str = f"https://github.com/{gh_repo.owner}/{gh_repo.name}"
     logger.info("--- Starting Investigation ---")
@@ -92,7 +98,7 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
     detected_stack = detect_stack(top_level_files)
 
     clean_tree = filter_noise(raw_tree)
-    workspace = InvestigationWorkspace(snapshot, clean_tree)
+    workspace = InvestigationWorkspace(snapshot, clean_tree, max_actions_override=max_actions)
 
     # Build the hierarchical repository map once before the investigation loop.
     repo_map = build_repo_map(workspace.allowed_paths)
@@ -165,9 +171,6 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
             except UnexpectedModelBehavior:
                 trace.termination_reason = TerminationReason.MAX_ACTIONS
 
-            if trace.termination_reason is None:
-                trace.termination_reason = workspace.get_termination_reason()
-
             if trace.termination_reason == TerminationReason.MODEL_FINISHED and result is not None:
                 cache_write_started = time.perf_counter()
                 try:
@@ -205,45 +208,37 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
 
     if cached_investigation is not None:
         inv_res = cached_investigation.get("investigation_result", {})
-        excerpts = inv_res.get("relevant_excerpts", [])
+        excerpts_dicts = inv_res.get("relevant_excerpts", [])
+        from app.services.investigation_agent import EvidenceExcerpt, DelegatedImplementationEvidence
+        excerpts = [EvidenceExcerpt.model_validate(e) for e in excerpts_dicts]
+
+        impls_dicts = inv_res.get("concrete_implementations_read", [])
+        for impl_dict in impls_dicts:
+            impl = DelegatedImplementationEvidence.model_validate(impl_dict)
+            excerpts.extend(impl.implementations)
+
         spans_dicts = cached_investigation.get("evidence_spans", [])
         from app.services.investigation_workspace import EvidenceSpan
         spans = [EvidenceSpan.model_validate(s) for s in spans_dicts]
     elif result is not None:
-        excerpts = result.output.relevant_excerpts
+        excerpts = list(result.output.relevant_excerpts)
+        for impl in result.output.concrete_implementations_read:
+            excerpts.extend(impl.implementations)
         spans = workspace.evidence_spans
     else:
         excerpts = []
         spans = []
 
+    # Get paths for final_evidence_paths
     for excerpt in excerpts:
-        if isinstance(excerpt, dict):
-            # Dict from cache
-            path = excerpt["path"]
-            start_line = excerpt["start_line"]
-            end_line = excerpt["end_line"]
-        else:
-            # Pydantic model
-            path = excerpt.path
-            start_line = excerpt.start_line
-            end_line = excerpt.end_line
+        final_evidence_paths.add(excerpt.path)
 
-        final_evidence_paths.add(path)
+    reconstructed_text = reconstruct_evidence_text(excerpts, spans)
+    total_final_evidence_chars = len(reconstructed_text)
 
-        # In a robust implementation, we would extract exactly the lines from the spans.
-        # Since the validator already proved the excerpt is covered by spans,
-        # we can just reconstruct the string from the spans.
-        excerpt_content = f"SOURCE: {path}\nLINES: {start_line}-{end_line}\n"
-
-        # A simple reconstruction: just append the content of matching spans
-        # (This may include some extra lines if spans are larger than the excerpt, but it is bounded and safe)
-        matching_spans = [s for s in spans if s.path == path and s.end_line >= start_line and s.start_line <= end_line]
-        for s in matching_spans:
-            excerpt_content += s.content + "\n"
-
-        key = f"{path}:{start_line}-{end_line}"
-        final_evidence_chunks[key] = excerpt_content
-        total_final_evidence_chars += len(excerpt_content)
+    # Pack it in a way answer_service expects, or just pass it as a single chunk
+    if reconstructed_text:
+        final_evidence_chunks["reconstructed_evidence"] = reconstructed_text
 
     context = {
         "owner": owner,
@@ -260,8 +255,20 @@ async def run_investigation(snapshot: RepositorySnapshot, question: str, trace: 
     }
 
     trace.final_evidence_files_count = len(final_evidence_paths)
-    trace.final_evidence_chars = total_final_evidence_chars
     trace.evidence_file_paths = sorted(list(final_evidence_paths))
+
+    trace.final_selected_evidence_chars = total_final_evidence_chars
+    trace.relevant_excerpts_count = len(excerpts)
+    if result is not None:
+        trace.observed_evidence_spans_count = len(spans)
+        trace.observed_evidence_chars = sum(len(s.content) for s in spans)
+
+    if trace.termination_reason != TerminationReason.MODEL_FINISHED:
+        logger.info(f"Skipping streamed answer generation due to early termination: {trace.termination_reason}")
+        yield InvestigationAnswerChunk(chunk=f"Investigation terminated early: {getattr(trace.termination_reason, 'value', trace.termination_reason)}")
+        trace.answer_generation_duration_sec = None
+        yield InvestigationCompleted()
+        return
 
     logger.info("Generating streamed answer using Gemini...")
     ans_res = prepare_answer_stream(question, context)

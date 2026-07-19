@@ -262,12 +262,12 @@ def test_eval_runner_is_explicit_and_dispatches_without_running_live_calls():
 
     with patch.object(runner, "run_cases") as run_cases, patch.object(runner.asyncio, "run") as asyncio_run:
         assert runner.main(["--case", "requests-session-002"]) == 0
-        run_cases.assert_called_once_with([runner._case_by_id("requests-session-002")])
+        run_cases.assert_called_once_with([runner._case_by_id("requests-session-002")], None)
         asyncio_run.assert_called_once()
 
     with patch.object(runner, "run_cases") as run_cases, patch.object(runner.asyncio, "run"):
         assert runner.main(["--all", "--confirm-live"]) == 0
-        run_cases.assert_called_once_with(runner.ALL_CASES)
+        run_cases.assert_called_once_with(runner.ALL_CASES, None)
 
 
 def test_diagnostics_is_explicit_and_rejects_unconfirmed_suite():

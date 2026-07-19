@@ -213,9 +213,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-eval_results.json
+eval_results/
 diagnostic_output.txt
 diagnostic_output_v2.txt
 diagnostic_output_v3.txt
 .trace-cache/
 scratch/
+eval_results.json

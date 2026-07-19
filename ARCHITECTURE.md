@@ -99,6 +99,8 @@ latency is not exposed through this path and is not estimated.
 On an investigation-cache hit, current-request investigation usage remains
 zero. Historical usage is not copied into current-request counters.
 
+Centralized production observability (e.g. OpenTelemetry/Langfuse) may be added after deployment/multi-user operation. Current structured InvestigationTrace is sufficient for local evaluation and optimization.
+
 ## Evaluation safety
 
 The evaluation runner is explicitly opt-in:
@@ -128,18 +130,17 @@ validation, retry behavior, answer formatting, and model selection. It would
 also make streaming structured output more complex. This remains a future
 optimization, not part of the current cache phase.
 
-## Future context-efficiency work
+## Future: Investigation Context Efficiency
 
-Per-request usage should first be used to measure history growth. Likely Phase F
-work, in order, is:
-
-1. bound or line-range `read_file` results;
-2. return compact search/listing summaries where full content is unnecessary;
-3. retain evidence in a local evidence store and send references or selected
-   excerpts rather than replaying every full tool result;
-4. evaluate PydanticAI history processors or selective history retention;
-5. compact final-answer evidence while preserving file and line grounding.
-
-Gemini provider-side context caching can be revisited after these measurements,
-but it is not currently enabled because tool/system-prompt ownership and cache
-lifecycle would add substantial complexity.
+* Phase F bounded reads reduce individual tool-result size.
+* Final-answer evidence reconstruction dramatically reduces final-answer context.
+* PydanticAI investigation history remains a cost hotspot.
+* Experimental removal/compaction of older ToolReturnPart content caused behavioral regressions.
+* Production therefore currently preserves full PydanticAI history for correctness.
+* Future options include:
+    * structured external working memory
+    * model-visible compact evidence ledger
+    * summarization/checkpointing designed into the agent state
+    * manual multi-step orchestration with controlled message history
+    * provider-side context caching after architecture stabilizes
+    * revisiting PydanticAI capabilities if newer framework versions provide safer memory management

@@ -23,7 +23,8 @@ class RunMetadata(BaseModel):
 
 class EvaluationResult(BaseModel):
     metadata: RunMetadata
-    success: bool
+    execution_success: bool
+    evaluation_pass: bool
     evidence_completeness_score: float
     answer_expected_terms_score: float
     files_read: list[str]
@@ -44,26 +45,27 @@ class EvaluationResult(BaseModel):
 
 class SuiteSummary(BaseModel):
     total_cases: int
-    successful_cases: int
+    successful_executions: int
+    evaluation_passes: int
     average_evidence_completeness: float
     average_answer_expected_terms_score: float
     total_input_tokens: int
     total_output_tokens: int
-    
+
     # Averages across all cases
     all_average_input_tokens: float
     all_average_output_tokens: float
     all_average_investigation_latency: float
     all_average_answer_generation_latency: float
     all_average_total_latency: float
-    
+
     # Averages across successful cases only
     success_average_input_tokens: float
     success_average_output_tokens: float
     success_average_investigation_latency: float
     success_average_answer_generation_latency: float
     success_average_total_latency: float
-    
+
     total_searches_used: int
     total_directory_listings_used: int
 

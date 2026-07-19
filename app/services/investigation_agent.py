@@ -26,6 +26,12 @@ class EvidenceExcerpt(BaseModel):
     justification: str = Field(description="Why this specific code block is relevant to the final answer.")
 
 
+class DelegatedImplementationEvidence(BaseModel):
+    delegated_interface: str = Field(description="The exact name of the delegated interface or abstraction this implements.")
+    implementations: list[EvidenceExcerpt] = Field(description="The concrete implementation excerpts you read for this interface.")
+
+
+
 class InvestigationResult(BaseModel):
     summary_of_evidence: str = Field(description="Summary of the evidence gathered.")
     delegated_interfaces_discovered: list[str] = Field(
@@ -34,8 +40,8 @@ class InvestigationResult(BaseModel):
     relevant_excerpts: list[EvidenceExcerpt] = Field(
         description="Crucial: Select specific, exact line ranges from the files you actually read via 'read_file' that support your final answer. These excerpts will be injected into the final answer generation step."
     )
-    concrete_implementations_read: list[EvidenceExcerpt] = Field(
-        description="List of exact excerpts you read that contain the concrete implementations of the delegated interfaces discovered."
+    concrete_implementations_read: list[DelegatedImplementationEvidence] = Field(
+        description="List explicitly mapping every discovered delegated interface to the exact implementation excerpts you read."
     )
 
 
@@ -54,7 +60,12 @@ CRITICAL EVIDENCE-COMPLETENESS POLICY:
 - If evidence delegates an important mechanism to another symbol, interface, strategy, or abstraction, YOU MUST FOLLOW THAT DEPENDENCY into its concrete implementation before finishing.
 - Do NOT finish merely because behavior can be inferred from interface names or abstraction signatures.
 - You must actively navigate/search for at least one concrete implementation of the delegated behavior and read its code.
-- Your final `InvestigationResult` requires you to explicitly cite the concrete implementation excerpts you read.
+- Your workflow for discovering concrete implementations MUST be:
+    1. Identify the delegated interface or abstraction (e.g. `authentication/strategy/base.py`).
+    2. Note the abstract class definition.
+    3. Use `list_directory` on the directory containing the abstraction (e.g. `authentication/strategy`) to discover sibling implementation modules. Do not rely on guessing that implementations live adjacent to the abstraction, verify it by listing the directory.
+    4. Use `read_file` on the sibling module to read the concrete implementation.
+    5. Record that observed concrete implementation evidence in `concrete_implementations_read`.
 - Avoid exhaustive traversal unrelated to the user's question, but core requested mechanisms must be traced down to their concrete logic.
 
 FINAL EVIDENCE GROUNDING:
@@ -63,12 +74,16 @@ FINAL EVIDENCE GROUNDING:
 - If you cite unread lines, your result will be rejected.
 """
 
+import json
+import dataclasses
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+
 investigation_agent = Agent(
     INVESTIGATION_MODEL,
     deps_type=AgentDeps,
     output_type=InvestigationResult,
     system_prompt=SYSTEM_PROMPT,
-    retries=2
+    retries=2,
 )
 
 
@@ -93,8 +108,24 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
                 "You must use list_directory or search_code to locate and read the implementation files before finishing."
             )
 
+        # Build a set of interfaces for which we provided implementations
+        provided_interfaces = {
+            impl.delegated_interface
+            for impl in result.concrete_implementations_read
+            if impl.implementations
+        }
+
+        missing = set(result.delegated_interfaces_discovered) - provided_interfaces
+        if missing:
+            raise ModelRetry(
+                f"You reported discovering delegated interfaces {missing} but did not provide concrete implementation excerpts for them. "
+                "You must use search_code or list_directory to locate their implementations and read them."
+            )
+
     # Validate all excerpts against observed EvidenceSpans
-    all_excerpts_to_check = result.relevant_excerpts + result.concrete_implementations_read
+    all_excerpts_to_check = list(result.relevant_excerpts)
+    for impl in result.concrete_implementations_read:
+        all_excerpts_to_check.extend(impl.implementations)
 
     for excerpt in all_excerpts_to_check:
         spans_for_path = [s for s in workspace.evidence_spans if s.path == excerpt.path]
@@ -152,11 +183,9 @@ def read_file(ctx: RunContext[AgentDeps], file_path: str, start_line: int | None
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    # The read_file file_path is already in allowed_paths, so we can log it safely if we want,
-    # but privacy mask here just to be safe. We'll use the bound_trace_string equivalent.
-    step_trace.action_arguments["file_path"] = (
-        file_path if file_path in workspace.allowed_paths else f"unauthorized_path_{len(file_path)}"
-    )
+    # Read file metadata not currently populated on obs
+    pass
+
     ctx.deps.trace.steps.append(step_trace)
 
     _check_domain_termination(ctx.deps)
@@ -186,8 +215,9 @@ def search_code(ctx: RunContext[AgentDeps], search_query: str, case_sensitive: b
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    if target_directory:
-        step_trace.action_arguments["target_directory_chars"] = str(len(target_directory))
+    # Search code metadata not currently populated on obs
+    pass
+
     ctx.deps.trace.steps.append(step_trace)
 
     _check_domain_termination(ctx.deps)
@@ -216,9 +246,14 @@ def list_directory(ctx: RunContext[AgentDeps], directory_path: str | None = None
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    entries = getattr(obs, "_entries_count", None)
-    if entries is not None:
-        step_trace.action_arguments["entries_returned"] = str(entries)
+    if hasattr(obs, "_entries_count"):
+        from app.investigation_trace import ListDirectoryTraceMetadata
+        step_trace.list_directory_metadata = ListDirectoryTraceMetadata(
+            directory_path=directory_path or "",
+            entries_returned=getattr(obs, "_entries_count"),
+            returned_chars=len(obs.content) if obs.content else 0
+        )
+
     ctx.deps.trace.steps.append(step_trace)
 
     _check_domain_termination(ctx.deps)

@@ -6,20 +6,22 @@ from datetime import datetime, timezone
 from app.services.github import GitHubRepository
 from app.services.repository_snapshot import RepositorySnapshot
 from app.services.investigation_service import run_investigation
-from app.investigation_trace import InvestigationTrace
+from app.investigation_trace import InvestigationTrace, trace_to_dict
 from app.investigation_events import InvestigationAnswerChunk, InvestigationCompleted
 from evals.schema import RunMetadata, EvaluationResult, EvaluationCase, SuiteSummary, SuiteEvaluationResult
 from evals.cases import ALL_CASES
 from evals.scorer import score_evidence_completeness, score_expected_terms
 
-async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
+import os
+
+async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_actions: int | None = None) -> EvaluationResult:
     print(f"Starting evaluation case: {case.id}")
     t_start = time.perf_counter()
-    
+
     gh_repo = GitHubRepository.from_url(case.repository_url)
     t_resolved = time.perf_counter()
     repository_resolution_latency = t_resolved - t_start
-    
+
     snapshot = RepositorySnapshot(gh_repo=gh_repo)
     try:
         snapshot.materialize()
@@ -28,19 +30,19 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
         return _build_failure_result(case, str(e), gh_repo.revision, repository_resolution_latency, time.perf_counter() - t_resolved)
     t_materialized = time.perf_counter()
     materialization_latency = t_materialized - t_resolved
-    
+
     trace = InvestigationTrace(
         started_at=datetime.now(timezone.utc).isoformat(),
         question_chars=len(case.question),
         _start_time=t_start
     )
-    
+
     answer_chunks = []
     t_inv_start = time.perf_counter()
     t_inv_end = None
-    
+
     try:
-        async for event in run_investigation(snapshot, case.question, trace):
+        async for event in run_investigation(snapshot, case.question, trace, max_actions):
             if isinstance(event, InvestigationAnswerChunk):
                 if t_inv_end is None:
                     t_inv_end = time.perf_counter()
@@ -55,19 +57,24 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
             snapshot.cleanup()
         except:
             pass
-            
+
     t_end = time.perf_counter()
-    
+
+    if run_dir:
+        trace_file = os.path.join(run_dir, f"{case.id}_trace.json")
+        with open(trace_file, "w", encoding="utf-8") as f:
+            json.dump(trace_to_dict(trace), f, indent=2)
+
     if t_inv_end is None:
         # If there were no answer chunks (e.g., immediate failure before answering)
         t_inv_end = t_end
-        
+
     investigation_latency = t_inv_end - t_inv_start
     answer_generation_latency = t_end - t_inv_end
     total_latency = t_end - t_start
-    
+
     final_answer = "".join(answer_chunks)
-    
+
     files_read = list(trace.evidence_file_paths)
     tool_sequence = []
     for step in trace.steps:
@@ -75,12 +82,17 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
         file_path = step.action_arguments.get("file_path")
         if step.action_chosen == "read_file" and file_path and file_path not in files_read:
             files_read.append(file_path)
-            
+
     evidence_score = score_evidence_completeness(files_read, case.expected_evidence_groups)
-    terms_score = score_expected_terms(final_answer, case.expected_answer_terms)
+    execution_success = getattr(trace.termination_reason, 'value', trace.termination_reason) == "model_finished"
     
-    success = (evidence_score == 1.0) and (trace.termination_reason == "model_finished")
-    
+    if execution_success:
+        terms_score = score_expected_terms(final_answer, case.expected_answer_terms)
+    else:
+        terms_score = 0.0
+
+    evaluation_pass = execution_success and (evidence_score == 1.0)
+
     return EvaluationResult(
         metadata=RunMetadata(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -89,7 +101,8 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
             repository_branch=gh_repo.metadata.get("default_branch") if gh_repo.metadata else None,
             case_id=case.id
         ),
-        success=success,
+        execution_success=execution_success,
+        evaluation_pass=evaluation_pass,
         evidence_completeness_score=evidence_score,
         answer_expected_terms_score=terms_score,
         files_read=files_read,
@@ -104,8 +117,8 @@ async def evaluate_case(case: EvaluationCase) -> EvaluationResult:
         investigation_latency=investigation_latency,
         answer_generation_latency=answer_generation_latency,
         total_latency=total_latency,
-        termination_reason=trace.termination_reason,
-        evidence_char_count=trace.final_evidence_chars
+        termination_reason=getattr(trace.termination_reason, 'value', trace.termination_reason),
+        evidence_char_count=trace.final_selected_evidence_chars if hasattr(trace, 'final_selected_evidence_chars') else getattr(trace, 'final_evidence_chars', 0)
     )
 
 def _build_failure_result(case: EvaluationCase, error_msg: str, revision: str | None, res_lat: float, mat_lat: float) -> EvaluationResult:
@@ -117,7 +130,8 @@ def _build_failure_result(case: EvaluationCase, error_msg: str, revision: str | 
             repository_branch=None,
             case_id=case.id
         ),
-        success=False,
+        execution_success=False,
+        evaluation_pass=False,
         evidence_completeness_score=0.0,
         answer_expected_terms_score=0.0,
         files_read=[],
@@ -140,7 +154,7 @@ def aggregate_suite_results(results: list[EvaluationResult]) -> SuiteSummary:
     total = len(results)
     if total == 0:
         return SuiteSummary(
-            total_cases=0, successful_cases=0, average_evidence_completeness=0.0,
+            total_cases=0, successful_executions=0, evaluation_passes=0, average_evidence_completeness=0.0,
             average_answer_expected_terms_score=0.0, total_input_tokens=0,
             total_output_tokens=0, all_average_input_tokens=0.0, all_average_output_tokens=0.0,
             all_average_investigation_latency=0.0, all_average_answer_generation_latency=0.0,
@@ -149,53 +163,67 @@ def aggregate_suite_results(results: list[EvaluationResult]) -> SuiteSummary:
             success_average_answer_generation_latency=0.0, success_average_total_latency=0.0,
             total_searches_used=0, total_directory_listings_used=0
         )
-        
-    successful_results = [r for r in results if r.success]
-    successful = len(successful_results)
-    
+
+    successful_executions_list = [r for r in results if r.execution_success]
+    evaluation_passes_list = [r for r in results if r.evaluation_pass]
+    successful_executions = len(successful_executions_list)
+    evaluation_passes = len(evaluation_passes_list)
+
     def avg(lst):
         filtered = [x for x in lst if x is not None]
         return sum(filtered) / len(filtered) if filtered else 0.0
 
     return SuiteSummary(
         total_cases=total,
-        successful_cases=successful,
+        successful_executions=successful_executions,
+        evaluation_passes=evaluation_passes,
         average_evidence_completeness=sum(r.evidence_completeness_score for r in results) / total,
         average_answer_expected_terms_score=sum(r.answer_expected_terms_score for r in results) / total,
         total_input_tokens=sum(r.input_tokens for r in results),
         total_output_tokens=sum(r.output_tokens for r in results),
-        
+
         all_average_input_tokens=sum(r.input_tokens for r in results) / total,
         all_average_output_tokens=sum(r.output_tokens for r in results) / total,
         all_average_investigation_latency=avg([r.investigation_latency for r in results]),
         all_average_answer_generation_latency=avg([r.answer_generation_latency for r in results]),
         all_average_total_latency=avg([r.total_latency for r in results]),
-        
-        success_average_input_tokens=sum(r.input_tokens for r in successful_results) / successful if successful > 0 else 0.0,
-        success_average_output_tokens=sum(r.output_tokens for r in successful_results) / successful if successful > 0 else 0.0,
-        success_average_investigation_latency=avg([r.investigation_latency for r in successful_results]),
-        success_average_answer_generation_latency=avg([r.answer_generation_latency for r in successful_results]),
-        success_average_total_latency=avg([r.total_latency for r in successful_results]),
-        
+
+        success_average_input_tokens=sum(r.input_tokens for r in successful_executions_list) / successful_executions if successful_executions > 0 else 0.0,
+        success_average_output_tokens=sum(r.output_tokens for r in successful_executions_list) / successful_executions if successful_executions > 0 else 0.0,
+        success_average_investigation_latency=avg([r.investigation_latency for r in successful_executions_list]),
+        success_average_answer_generation_latency=avg([r.answer_generation_latency for r in successful_executions_list]),
+        success_average_total_latency=avg([r.total_latency for r in successful_executions_list]),
+
         total_searches_used=sum(r.searches_used for r in results),
         total_directory_listings_used=sum(r.directory_listings_used for r in results)
     )
 
-async def run_cases(cases: list[EvaluationCase]) -> None:
+async def run_cases(cases: list[EvaluationCase], max_actions: int | None = None):
     results = []
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("eval_results", run_id)
+    os.makedirs(run_dir, exist_ok=True)
+
     for case in cases:
-        res = await evaluate_case(case)
+        res = await evaluate_case(case, run_dir, max_actions)
+
+        # Write case result to the run_dir
+        with open(os.path.join(run_dir, f"{case.id}.json"), "w", encoding="utf-8") as f:
+            json.dump(res.model_dump(), f, indent=2)
+
         results.append(res)
         if len(cases) > 1:
             await asyncio.sleep(20) # Avoid Gemini API rate limits
-        
+
     summary = aggregate_suite_results(results)
     suite_result = SuiteEvaluationResult(summary=summary, results=results)
-    
-    with open("eval_results.json", "w") as f:
+
+    # Write summary to the run_dir
+    with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(suite_result.model_dump(), f, indent=2)
-        
-    print(f"Evaluated {len(results)} cases. Successful: {summary.successful_cases}. Results saved to eval_results.json.")
+
+    print(f"Evaluated {len(results)} cases. Successful executions: {summary.successful_executions}. Eval passes: {summary.evaluation_passes}. Results saved to {run_dir}.")
 
 
 def _case_by_id(case_id: str) -> EvaluationCase | None:
@@ -208,10 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--case", metavar="CASE_ID", help="Run exactly one live evaluation case.")
     selection.add_argument("--all", action="store_true", help="Run the complete live evaluation suite.")
     parser.add_argument("--confirm-live", action="store_true", help="Confirm that the selected run makes live API/model calls.")
+    parser.add_argument("--max-actions", type=int, help="Override the InvestigationWorkspace.MAX_ACTIONS budget.", default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    import logging
+    logging.basicConfig(level=logging.INFO)
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -228,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             for available in ALL_CASES:
                 print(f"  {available.id}")
             return 2
-        asyncio.run(run_cases([case]))
+        asyncio.run(run_cases([case], args.max_actions))
         return 0
 
     if not args.confirm_live:
@@ -237,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("WARNING: running all evaluation cases will make multiple live GitHub and Gemini API calls.")
-    asyncio.run(run_cases(ALL_CASES))
+    asyncio.run(run_cases(ALL_CASES, args.max_actions))
     return 0
 
 

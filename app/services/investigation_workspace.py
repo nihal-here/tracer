@@ -140,9 +140,11 @@ class InvestigationWorkspace:
     # Reaching MAX_SEARCHES still allows READ_FILE and LIST_DIRECTORY as
     # long as MAX_ACTIONS has not been exhausted.
 
-    def __init__(self, snapshot: RepositorySnapshot, allowed_paths: Iterable[str]):
+    def __init__(self, snapshot: RepositorySnapshot, allowed_paths: Iterable[str], max_actions_override: int | None = None):
         self.snapshot = snapshot
         self.allowed_paths = frozenset(allowed_paths)
+        if max_actions_override is not None:
+            self.MAX_ACTIONS = max_actions_override # pyright: ignore[reportConstantRedefinition]
 
         self.actions = 0
         self.past_searches: set[tuple[str, str | None, bool]] = set()
