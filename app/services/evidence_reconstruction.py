@@ -1,4 +1,4 @@
-from typing import Iterable, Sequence, Any
+from typing import Sequence, Any
 from collections import defaultdict
 
 class GapInCoverageError(Exception):

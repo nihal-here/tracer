@@ -57,6 +57,12 @@ def _remove_cache_entry(path: Path) -> None:
             pass
 
 class RepositorySnapshot:
+    gh_repo: "GitHubRepository"
+    cache_dir: "Path | None"
+    is_cached: bool
+    cache_hit: bool
+    cache_lookup_duration_sec: float
+
     def __init__(self, gh_repo: GitHubRepository, cache_dir: Path | None = None):
         self.gh_repo = gh_repo
         self.cache_dir = cache_dir.expanduser() if cache_dir is not None else None

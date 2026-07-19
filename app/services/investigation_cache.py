@@ -67,6 +67,9 @@ class InvestigationCacheKey:
 
 
 class InvestigationCache:
+    root: "Path"
+    entries_dir: "Path"
+
     def __init__(self, root: Path | None = None):
         self.root = (root or cache_root()).expanduser()
         self.entries_dir = self.root / "investigations"

@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
@@ -74,9 +73,6 @@ FINAL EVIDENCE GROUNDING:
 - If you cite unread lines, your result will be rejected.
 """
 
-import json
-import dataclasses
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 
 investigation_agent = Agent(
     INVESTIGATION_MODEL,
@@ -104,7 +100,7 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
     if result.delegated_interfaces_discovered:
         if not result.concrete_implementations_read:
             raise ModelRetry(
-                "You discovered delegated interfaces but did not read their concrete implementations. "
+                "You discovered delegated interfaces but did not read their concrete implementations. " +
                 "You must use list_directory or search_code to locate and read the implementation files before finishing."
             )
 
@@ -118,7 +114,7 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
         missing = set(result.delegated_interfaces_discovered) - provided_interfaces
         if missing:
             raise ModelRetry(
-                f"You reported discovering delegated interfaces {missing} but did not provide concrete implementation excerpts for them. "
+                f"You reported discovering delegated interfaces {missing} but did not provide concrete implementation excerpts for them. " +
                 "You must use search_code or list_directory to locate their implementations and read them."
             )
 
@@ -131,7 +127,7 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
         spans_for_path = [s for s in workspace.evidence_spans if s.path == excerpt.path]
         if not spans_for_path:
             raise ModelRetry(
-                f"You claimed evidence for {excerpt.path} but never successfully read this file. "
+                f"You claimed evidence for {excerpt.path} but never successfully read this file. " +
                 "You must use `read_file` to observe it before citing it."
             )
 
@@ -147,7 +143,7 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
             min_unobs = min(unobserved)
             max_unobs = max(unobserved)
             raise ModelRetry(
-                f"You claimed evidence for {excerpt.path}:{excerpt.start_line}-{excerpt.end_line} but lines {min_unobs}-{max_unobs} were never observed. "
+                f"You claimed evidence for {excerpt.path}:{excerpt.start_line}-{excerpt.end_line} but lines {min_unobs}-{max_unobs} were never observed. " +
                 f"You must invoke `read_file` to observe these lines before citing them."
             )
 

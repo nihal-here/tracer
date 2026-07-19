@@ -75,15 +75,28 @@ def test_invalid_repository_path_never_gets_a_github_url():
 
 
 def test_answer_citation_validation_handles_valid_unknown_and_malformed_tokens():
-    citations = [SourceCitation(citation_id="1", path="a.py", start_line=1, end_line=2, commit_sha="sha")]
-    valid = validate_answer_citations("The behavior is here [1].", citations)
-    invalid = validate_answer_citations("Unknown [99] and malformed [abc].", citations)
+    citations = [
+        SourceCitation(citation_id="1", path="a.py", start_line=1, end_line=2, commit_sha="sha"),
+        SourceCitation(citation_id="2", path="b.py", start_line=1, end_line=2, commit_sha="sha"),
+        SourceCitation(citation_id="3", path="c.py", start_line=1, end_line=2, commit_sha="sha"),
+    ]
 
+    # Test individual and grouped valid citations
+    valid = validate_answer_citations("Single [1], grouped [2, 3], tight [1,2,3], and repeated [2, 2]", citations)
     assert valid.valid is True
-    assert valid.referenced_ids == ("1",)
+    assert valid.referenced_ids == ("1", "2", "3")
+
+    # Test unknown ID within a group
+    invalid = validate_answer_citations("Unknown [99] and mixed group [1, 99]", citations)
     assert invalid.valid is False
+    assert invalid.referenced_ids == ("1",)
     assert invalid.unknown_ids == ("99",)
-    assert invalid.malformed_tokens == ("abc",)
+
+    # Test existing malformed cases (non-numeric parts)
+    malformed = validate_answer_citations("Malformed [abc] and [1, abc]", citations)
+    assert malformed.valid is False
+    assert malformed.referenced_ids == ()
+    assert malformed.malformed_tokens == ("1, abc", "abc")
 
 
 def test_answer_prompt_contains_only_selected_citation_evidence():

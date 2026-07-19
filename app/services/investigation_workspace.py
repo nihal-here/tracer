@@ -62,7 +62,7 @@ def _rg_binary() -> str:
     rg = shutil.which("rg")
     if rg is None:
         raise FileNotFoundError(
-            "ripgrep (rg) is not available on PATH. "
+            "ripgrep (rg) is not available on PATH. " +
             "Install it (e.g. brew install ripgrep) to use search_code."
         )
     return rg
@@ -148,6 +148,15 @@ class InvestigationWorkspace:
     #   - A separate counter would add complexity without adding safety.
     # Reaching MAX_SEARCHES still allows READ_FILE and LIST_DIRECTORY as
     # long as MAX_ACTIONS has not been exhausted.
+
+    snapshot: "RepositorySnapshot"
+    allowed_paths: frozenset[str]
+    actions: int
+    invalid_actions: int
+    consecutive_no_progress: int
+    total_evidence_chars: int
+    total_searches: int
+    is_finished: bool
 
     def __init__(self, snapshot: RepositorySnapshot, allowed_paths: Iterable[str], max_actions_override: int | None = None):
         self.snapshot = snapshot

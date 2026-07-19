@@ -130,13 +130,20 @@ def validate_answer_citations(answer: str, citations: Sequence[SourceCitation]) 
     malformed: set[str] = set()
     for match in re.finditer(r"\[([^]\n]*)\]", answer):
         token = match.group(1).strip()
-        if token.isdigit():
-            if token in allowed:
-                referenced.add(token)
-            else:
-                unknown.add(token)
-        elif token:
+        if not token:
+            continue
+
+        parts = [p.strip() for p in token.split(",")]
+
+        if all(p.isdigit() for p in parts):
+            for p in parts:
+                if p in allowed:
+                    referenced.add(p)
+                else:
+                    unknown.add(p)
+        else:
             malformed.add(token)
+
     return AnswerCitationValidation(
         referenced_ids=tuple(sorted(referenced, key=lambda value: int(value))),
         unknown_ids=tuple(sorted(unknown, key=lambda value: int(value))),

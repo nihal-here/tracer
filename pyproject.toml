@@ -1,0 +1,16 @@
+[tool.pyright]
+include = ["app", "tests", "evals"]
+venvPath = "."
+venv = ".venv"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."]
+reportMissingParameterType = false
+reportUnknownParameterType = false
+reportPrivateUsage = false
+reportUnknownMemberType = false
+reportAny = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnusedCallResult = false
