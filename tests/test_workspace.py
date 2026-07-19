@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock
 from app.services.investigation_workspace import InvestigationWorkspace
 
@@ -114,7 +113,7 @@ def test_search_code_limits(tmp_path):
 def test_search_code_oversized_file_skipped(tmp_path):
     """Files exceeding MAX_FILE_SIZE_BYTES are skipped by ripgrep (--max-filesize)."""
     class SmallFileSizeWorkspace(InvestigationWorkspace):
-        MAX_FILE_SIZE_BYTES = 10  # only 10 bytes allowed per file
+        MAX_FILE_SIZE_BYTES: int = 10  # only 10 bytes allowed per file
 
     # File is larger than the limit → ripgrep will skip it
     files = {"big.txt": "123456789012345find_me"}
