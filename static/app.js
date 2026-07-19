@@ -11,6 +11,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const repoLang = document.getElementById("repo-lang");
     const answerBox = document.getElementById("answer-box");
     const sourcesList = document.getElementById("sources-list");
+    const citationsList = document.getElementById("citations-list");
+    const investigationList = document.getElementById("investigation-list");
 
     form.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -24,6 +26,8 @@ document.addEventListener("DOMContentLoaded", () => {
         resultsContainer.classList.add("hidden");
         errorContainer.classList.add("hidden");
         errorContainer.textContent = "";
+        citationsList.innerHTML = "";
+        investigationList.innerHTML = "";
         
         // Loading State
         submitBtn.disabled = true;
@@ -99,6 +103,32 @@ document.addEventListener("DOMContentLoaded", () => {
                                     // Apply highlight.js to code blocks
                                     document.querySelectorAll('pre code').forEach((block) => {
                                         hljs.highlightElement(block);
+                                    });
+                                }
+                                if (data.citations) {
+                                    citationsList.innerHTML = "";
+                                    data.citations.forEach(citation => {
+                                        const li = document.createElement("li");
+                                        const label = `[${citation.citation_id}] ${citation.path}:L${citation.start_line}-L${citation.end_line}`;
+                                        if (citation.url) {
+                                            const link = document.createElement("a");
+                                            link.href = citation.url;
+                                            link.target = "_blank";
+                                            link.rel = "noreferrer";
+                                            link.textContent = label;
+                                            li.appendChild(link);
+                                        } else {
+                                            li.textContent = label;
+                                        }
+                                        citationsList.appendChild(li);
+                                    });
+                                }
+                                if (data.investigation_trace) {
+                                    investigationList.innerHTML = "";
+                                    data.investigation_trace.forEach(step => {
+                                        const li = document.createElement("li");
+                                        li.textContent = step.result_summary || `${step.tool} completed`;
+                                        investigationList.appendChild(li);
                                     });
                                 }
                             } catch (err) {

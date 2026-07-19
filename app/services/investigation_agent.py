@@ -183,8 +183,17 @@ def read_file(ctx: RunContext[AgentDeps], file_path: str, start_line: int | None
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    # Read file metadata not currently populated on obs
-    pass
+    from app.investigation_trace import ReadFileTraceMetadata
+    step_trace.read_file_metadata = ReadFileTraceMetadata(
+        requested_path=file_path,
+        requested_start_line=start_line,
+        requested_end_line=end_line,
+        actual_start_line=obs.actual_start_line,
+        actual_end_line=obs.actual_end_line,
+        total_file_lines=obs.total_file_lines,
+        truncated=obs.truncated,
+        returned_chars=obs.returned_chars,
+    )
 
     ctx.deps.trace.steps.append(step_trace)
 
@@ -215,8 +224,14 @@ def search_code(ctx: RunContext[AgentDeps], search_query: str, case_sensitive: b
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    # Search code metadata not currently populated on obs
-    pass
+    from app.investigation_trace import SearchCodeTraceMetadata
+    step_trace.search_code_metadata = SearchCodeTraceMetadata(
+        query=search_query,
+        scope=target_directory,
+        case_sensitive=case_sensitive,
+        matches_returned=obs.matches_returned,
+        returned_chars=obs.returned_chars,
+    )
 
     ctx.deps.trace.steps.append(step_trace)
 
@@ -246,13 +261,12 @@ def list_directory(ctx: RunContext[AgentDeps], directory_path: str | None = None
         decision_duration_sec=None,
         execution_duration_sec=duration
     )
-    if hasattr(obs, "_entries_count"):
-        from app.investigation_trace import ListDirectoryTraceMetadata
-        step_trace.list_directory_metadata = ListDirectoryTraceMetadata(
-            directory_path=directory_path or "",
-            entries_returned=getattr(obs, "_entries_count"),
-            returned_chars=len(obs.content) if obs.content else 0
-        )
+    from app.investigation_trace import ListDirectoryTraceMetadata
+    step_trace.list_directory_metadata = ListDirectoryTraceMetadata(
+        directory_path=directory_path or "",
+        entries_returned=obs.entries_returned,
+        returned_chars=obs.returned_chars,
+    )
 
     ctx.deps.trace.steps.append(step_trace)
 

@@ -30,6 +30,16 @@ class InvestigationAnswerChunk:
 
 
 @dataclass(frozen=True)
+class CitationMetadata:
+    citations: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class InvestigationTraceMetadata:
+    steps: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
 class InvestigationCompleted:
     pass
 
@@ -37,6 +47,8 @@ class InvestigationCompleted:
 InvestigationEvent = Union[
     InvestigationMetadata,
     InvestigationFileRead,
+    CitationMetadata,
+    InvestigationTraceMetadata,
     InvestigationAnswerChunk,
     InvestigationCompleted
 ]

@@ -2,7 +2,14 @@ from app.models import HealthResponse, InvestigateRequest, ReadmeResponse, RepoR
 from app.services.investigation_service import run_investigation, readme_repo, context_repo, github_error_boundary
 from app.services.github import GitHubRepository
 from app.services.repository_snapshot import RepositorySnapshot
-from app.investigation_events import InvestigationEvent, InvestigationMetadata, InvestigationAnswerChunk
+from app.investigation_events import (
+    InvestigationEvent,
+    InvestigationMetadata,
+    CitationMetadata,
+    InvestigationTraceMetadata,
+    InvestigationAnswerChunk,
+    InvestigationCompleted,
+)
 from app.investigation_trace import InvestigationTrace, FailureStage, emit_trace
 import time
 from datetime import datetime, timezone
@@ -33,8 +40,14 @@ async def _sse_adapter(events: AsyncIterator[InvestigationEvent]):
     async for event in events:
         if isinstance(event, InvestigationMetadata):
             yield f"data: {json.dumps({'metadata': asdict(event)})}\n\n"
+        elif isinstance(event, CitationMetadata):
+            yield f"data: {json.dumps({'citations': event.citations})}\n\n"
+        elif isinstance(event, InvestigationTraceMetadata):
+            yield f"data: {json.dumps({'investigation_trace': event.steps})}\n\n"
         elif isinstance(event, InvestigationAnswerChunk):
             yield f"data: {json.dumps({'chunk': event.chunk})}\n\n"
+        elif isinstance(event, InvestigationCompleted):
+            yield "data: {\"completed\": true}\n\n"
 
 @app.post("/investigate")
 async def investigate(request: InvestigateRequest):

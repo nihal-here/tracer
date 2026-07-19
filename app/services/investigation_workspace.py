@@ -39,6 +39,15 @@ class AgentObservation:
     result_status: str
     content: Optional[str]
     new_evidence_added: bool
+    actual_start_line: int | None = None
+    actual_end_line: int | None = None
+    total_file_lines: int | None = None
+    truncated: bool | None = None
+    matches_returned: int | None = None
+    entries_returned: int | None = None
+    returned_chars: int | None = None
+    query: str | None = None
+    scope: str | None = None
 
 
 @dataclass
@@ -414,7 +423,12 @@ class InvestigationWorkspace:
             path=path,
             result_status="success",
             content=final_content,
-            new_evidence_added=True
+            new_evidence_added=True,
+            actual_start_line=actual_start,
+            actual_end_line=actual_end,
+            total_file_lines=total_lines,
+            truncated=truncated,
+            returned_chars=len(final_content),
         )
         self.consecutive_no_progress = 0
         self.history.append(obs)
@@ -572,11 +586,13 @@ class InvestigationWorkspace:
             result_status="success",
             content=content,
             new_evidence_added=True,  # Counts as forward progress
+            entries_returned=entries_count,
+            returned_chars=len(content),
         )
         # Store entry count as extra metadata in the observation for tracing.
         # We tag it on as an attribute so the trace layer can access it without
         # parsing the content string.
-        object.__setattr__(obs, "_entries_count", entries_count) # pyright: ignore
+        object.__setattr__(obs, "_entries_count", entries_count)
         self.consecutive_no_progress = 0
         self.history.append(obs)
         return obs
@@ -863,7 +879,11 @@ class InvestigationWorkspace:
             path=None,
             result_status="success",
             content=content,
-            new_evidence_added=True  # Treat searches as progress
+            new_evidence_added=True,  # Treat searches as progress
+            matches_returned=len(matches),
+            returned_chars=len(content),
+            query=query,
+            scope=target_directory,
         )
         self.consecutive_no_progress = 0
         self.history.append(obs)

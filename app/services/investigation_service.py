@@ -6,11 +6,19 @@ from app.models import ContextResponse, ReadmeResponse
 from app.investigation_events import (
     InvestigationEvent,
     InvestigationMetadata,
+    CitationMetadata,
+    InvestigationTraceMetadata,
     InvestigationAnswerChunk,
     InvestigationCompleted
 )
 from app.services.answer_service import prepare_answer_stream
 from app.services.evidence_reconstruction import reconstruct_evidence_text
+from app.services.citations import (
+    CitationValidationError,
+    build_citation_evidence,
+    validate_answer_citations,
+)
+from app.services.public_trace import build_public_investigation_steps
 from app.services.investigation_workspace import InvestigationWorkspace
 from app.services.repo_map import build_repo_map
 from app.investigation_trace import (
@@ -136,8 +144,16 @@ async def run_investigation(
             # We now rely on the new InvestigationResult format and evidence_spans in cache
             inv_res_dict = cached_investigation.get("investigation_result", {})
             from app.services.investigation_agent import InvestigationResult
-            # Just parse it to ensure it's valid
-            InvestigationResult.model_validate(inv_res_dict)
+            from app.services.investigation_workspace import EvidenceSpan
+            cached_result = InvestigationResult.model_validate(inv_res_dict)
+            cached_excerpts = list(cached_result.relevant_excerpts)
+            for impl in cached_result.concrete_implementations_read:
+                cached_excerpts.extend(impl.implementations)
+            cached_spans = [
+                EvidenceSpan.model_validate(span)
+                for span in cached_investigation.get("evidence_spans", [])
+            ]
+            reconstruct_evidence_text(cached_excerpts, cached_spans)
 
             trace.investigation_cache_hit = True
             trace.termination_reason = TerminationReason.MODEL_FINISHED
@@ -236,6 +252,21 @@ async def run_investigation(
     reconstructed_text = reconstruct_evidence_text(excerpts, spans)
     total_final_evidence_chars = len(reconstructed_text)
 
+    citation_evidence = []
+    if trace.termination_reason == TerminationReason.MODEL_FINISHED:
+        try:
+            citation_evidence = build_citation_evidence(
+                excerpts,
+                spans,
+                owner,
+                name,
+                gh_repo.revision,
+            )
+        except CitationValidationError as exc:
+            trace.failure_stage = FailureStage.AGENT_DECISION
+            trace.error_type = type(exc).__name__
+            raise
+
     # Pack it in a way answer_service expects, or just pass it as a single chunk
     if reconstructed_text:
         final_evidence_chunks["reconstructed_evidence"] = reconstructed_text
@@ -252,6 +283,13 @@ async def run_investigation(
         "detected_stack": detected_stack,
         "default_branch": gh_repo.default_branch,
         "file_contents": final_evidence_chunks,
+        "citation_blocks": [
+            {
+                "citation": item.citation.model_dump(mode="json"),
+                "evidence": item.evidence,
+            }
+            for item in citation_evidence
+        ],
     }
 
     trace.final_evidence_files_count = len(final_evidence_paths)
@@ -259,9 +297,16 @@ async def run_investigation(
 
     trace.final_selected_evidence_chars = total_final_evidence_chars
     trace.relevant_excerpts_count = len(excerpts)
-    if result is not None:
-        trace.observed_evidence_spans_count = len(spans)
-        trace.observed_evidence_chars = sum(len(s.content) for s in spans)
+    trace.observed_evidence_spans_count = len(spans)
+    trace.observed_evidence_chars = sum(len(s.content) for s in spans)
+    trace.citation_count = len(citation_evidence)
+    trace.public_trace_step_count = len(trace.steps)
+
+    yield InvestigationTraceMetadata(steps=build_public_investigation_steps(trace.steps))
+    if citation_evidence and trace.termination_reason == TerminationReason.MODEL_FINISHED:
+        yield CitationMetadata(
+            citations=[item.citation.model_dump(mode="json") for item in citation_evidence]
+        )
 
     if trace.termination_reason != TerminationReason.MODEL_FINISHED:
         logger.info(f"Skipping streamed answer generation due to early termination: {trace.termination_reason}")
@@ -275,10 +320,26 @@ async def run_investigation(
     trace.final_prompt_chars = ans_res.prompt_chars
 
     start_ans_time = time.perf_counter()
+    answer_text_parts: list[str] = []
     try:
         for chunk in ans_res.chunk_generator:
             trace.answer_chunks_emitted += 1
+            answer_text_parts.append(chunk)
             yield InvestigationAnswerChunk(chunk=chunk)
+
+        citation_validation = validate_answer_citations(
+            "".join(answer_text_parts),
+            [item.citation for item in citation_evidence],
+        )
+        trace.answer_citation_ids = list(citation_validation.referenced_ids)
+        trace.unknown_answer_citation_ids = list(citation_validation.unknown_ids)
+        trace.malformed_answer_citations = list(citation_validation.malformed_tokens)
+        trace.answer_citations_valid = citation_validation.valid
+        citation_by_id = {item.citation.citation_id: item for item in citation_evidence}
+        trace.cited_evidence_chars = sum(
+            len(citation_by_id[citation_id].evidence)
+            for citation_id in citation_validation.referenced_ids
+        )
     except Exception as e:
         trace.failure_stage = FailureStage.ANSWER_GENERATION
         trace.error_type = type(e).__name__

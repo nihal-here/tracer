@@ -45,8 +45,9 @@ def test_sse_adapter_mapping():
     import asyncio
     result = asyncio.run(run_adapter())
 
-    assert len(result) == 2
+    assert len(result) == 3
     assert "metadata" in result[0]
     assert "src" in result[0]
     assert "chunk" in result[1]
     assert "hello" in result[1]
+    assert '"completed": true' in result[2]

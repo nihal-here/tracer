@@ -105,6 +105,13 @@ class InvestigationTrace:
     observed_evidence_spans_count: int = 0
     relevant_excerpts_count: int = 0
     final_selected_evidence_chars: int = 0
+    citation_count: int = 0
+    cited_evidence_chars: int = 0
+    public_trace_step_count: int = 0
+    answer_citation_ids: list[str] = field(default_factory=list)
+    unknown_answer_citation_ids: list[str] = field(default_factory=list)
+    malformed_answer_citations: list[str] = field(default_factory=list)
+    answer_citations_valid: bool | None = None
 
     # PydanticAI metrics
     model_requests: int = 0

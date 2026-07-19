@@ -1,146 +1,169 @@
 # Trace Architecture
 
-Trace is a small FastAPI application with a static browser client and one
-streaming investigation endpoint. It uses GitHub for repository data and
-Gemini through PydanticAI for repository investigation and final answer
-generation.
+Trace is a FastAPI application with a small browser client. It resolves an
+immutable GitHub commit, investigates a local repository snapshot with
+PydanticAI, reconstructs only validated evidence, and streams a grounded
+answer over Server-Sent Events (SSE).
 
 ## Request flow
 
 `POST /investigate` follows this sequence:
 
-1. Resolve the GitHub repository metadata and default-branch commit SHA.
-2. Materialize the exact commit into the persistent filesystem snapshot cache.
-   A cache miss downloads and safely extracts the GitHub tarball; a hit reuses
-   the already extracted files.
-3. Read top-level file names and README content from the local snapshot.
-4. Filter noisy paths and build the deterministic hierarchical repository map.
-5. Build a versioned investigation-cache key from the repository identity,
-   commit SHA, normalized question, model, prompt version, tool version, and
-   workspace-policy version.
-6. On an investigation-cache hit, restore the structured result and gathered
-   evidence without making investigation-model requests. On a miss, run the
-   PydanticAI agent with `read_file`, `search_code`, and `list_directory`.
-7. Persist only successful, evidence-complete investigation results using an
-   atomic filesystem write.
-8. Generate the final answer in a separate Gemini streaming request. This
-   remains separate even when investigation evidence came from cache.
-9. Emit answer chunks as Server-Sent Events and release the request's snapshot
-   handle. Persistent cached snapshots are retained.
+1. Resolve GitHub metadata and the exact branch commit SHA.
+2. Materialize the commit into the persistent filesystem snapshot cache.
+3. Read repository metadata, top-level names, and README information locally.
+4. Filter noisy paths and build the deterministic repository map.
+5. Look up the versioned investigation-result cache.
+6. On a miss, run the PydanticAI agent with bounded `read_file`, `search_code`,
+   and `list_directory` tools.
+7. Validate every `EvidenceExcerpt` against observed `EvidenceSpan` line
+   coverage, including delegated concrete implementations.
+8. On success, deterministically merge overlapping excerpts into source
+   citations and reconstruct only those selected lines.
+9. Emit sanitized investigation steps and citation metadata, then stream the
+   separate final answer model.
+10. Validate answer citation tokens after streaming and emit completion.
 
-The current implementation does not use Redis, a database, embeddings, RAG,
-or Gemini provider-side context caching.
+The investigation agent and final answer remain separate model passes. No
+additional model request is used for citations or the public trace.
 
-## Caches
+## SSE contract
 
-Both caches use hashed filenames and never place repository names or questions
-directly in paths.
-
-### Repository snapshot cache
-
-The snapshot key is derived from:
+Each event is encoded as one JSON object in an SSE `data:` frame. A normal
+successful flow is:
 
 ```text
-provider + owner + repository + exact commit SHA
+metadata
+investigation_trace
+citations
+chunk (repeated)
+completed
 ```
 
-The cache stores safely extracted files and a completion manifest. Population
-uses a temporary directory followed by an atomic directory rename. A simple
-per-key in-process lock prevents concurrent population of the same snapshot
-within one process. Corrupt, incomplete, expired, or incompatible entries are
-ignored and rebuilt.
+The event payloads are:
 
-### Investigation-result cache
+```json
+{"metadata": {"repo": "...", "owner": "...", "sources": [...]}}
+{"investigation_trace": [{"action_number": 1, "tool": "read_file", "path": "src/auth.py", "start_line": 10, "end_line": 24, "result_summary": "Read src/auth.py lines 10-24."}]}
+{"citations": [{"citation_id": "1", "path": "src/auth.py", "start_line": 10, "end_line": 24, "commit_sha": "...", "url": "..."}]}
+{"chunk": "The implementation ... [1]."}
+{"completed": true}
+```
 
-The investigation key includes:
+`investigation_trace` contains observable actions only. It does not contain
+model messages, prompts, tool-return contents, hidden reasoning, or host file
+paths. A failed investigation does not emit citation metadata. Domain budget
+termination emits a sanitized trace and a termination answer chunk but no
+misleading citations.
+
+The existing metadata and answer chunk payloads remain compatible. Completion
+is now represented explicitly; clients that ignore unknown SSE payload keys can
+continue consuming metadata and chunks.
+
+## Evidence and citations
+
+`EvidenceSpan` records what the investigation actually observed:
 
 ```text
-provider
-owner
-repository
-exact commit SHA
-normalized question
-effective investigation model
-investigation prompt version
-tool schema version
-workspace policy version
+path, start_line, end_line, content, source_action_index, truncated
 ```
 
-Question normalization trims leading/trailing whitespace and collapses
-repeated whitespace. It does not lowercase or otherwise rewrite meaning.
+`EvidenceExcerpt` records the line range selected by the validated structured
+investigation result. `reconstruct_evidence_text` rejects any excerpt with a
+coverage gap.
 
-Only successful `model_finished` investigations are cached. Exceptions,
-budget terminations, invalid actions, incomplete work, and partial writes are
-not cached. Malformed entries are cache misses.
-
-The default cache root is the operating system temporary directory under
-`trace-cache`. It can be changed with:
+`SourceCitation` is generated only after that validation:
 
 ```text
-TRACE_CACHE_DIR=/path/to/cache
-TRACE_SNAPSHOT_CACHE_TTL_SECONDS=86400
+citation_id, path, start_line, end_line, commit_sha, url
 ```
 
-If a project-local cache directory is used, `.trace-cache/` should remain
-ignored by Git. Cache failures degrade to the uncached path wherever possible.
+Citation IDs are stable strings (`"1"`, `"2"`, …) assigned after sorting by
+repository-relative path and line range. Exact duplicates are removed and
+overlapping ranges for the same path are merged. Citations are therefore
+deterministic for the same validated investigation result.
 
-## Observability
+The final answer prompt receives only selected citation blocks, each labeled
+with its citation ID, path, line range, and reconstructed observed evidence.
+It explicitly requires repository-specific claims to use supplied IDs and
+forbids invented IDs, paths, and line ranges. The streamed answer is not
+rewritten after generation. Its `[1]`-style tokens are validated afterward for
+known IDs and malformed/unknown references and recorded in `InvestigationTrace`.
 
-Trace logs aggregate request metrics including model requests, input/output
-tokens, evidence size, action counts, cache hits, and cache lookup/write
-durations.
+Immutable GitHub blob URLs are generated only when the owner, repository, path,
+and a hexadecimal commit SHA pass local safety checks. Otherwise `url` is
+`null`; citation correctness does not depend on URL generation.
 
-PydanticAI 2.13's public `AgentRunResult.all_messages()` API is used to inspect
-each public `ModelResponse.usage`. Per-response metrics include request number,
-input/output tokens, cumulative totals, cache read/write token fields, and the
-names of tool results immediately preceding the request. Per-request model
-latency is not exposed through this path and is not estimated.
+## Cache compatibility
 
-On an investigation-cache hit, current-request investigation usage remains
-zero. Historical usage is not copied into current-request counters.
+Repository snapshots are cached by provider, owner, repository, and exact
+commit SHA. Investigation results are cached by repository identity, commit,
+normalized question, model, prompt version, tool schema version, and workspace
+policy version.
 
-Centralized production observability (e.g. OpenTelemetry/Langfuse) may be added after deployment/multi-user operation. Current structured InvestigationTrace is sufficient for local evaluation and optimization.
+Cached investigations retain the structured result and serialized
+`EvidenceSpan` objects. The same local validation, reconstruction, citation
+generation, and URL generation run after a cache hit; no investigation-model
+request is needed. Citation generation therefore does not invalidate existing
+valid investigation caches, and no cache version bump is required for Phase G.
 
-## Evaluation safety
+Cache writes remain atomic and only successful evidence-complete investigations
+are persisted. Corrupt or incompatible entries are treated as misses.
 
-The evaluation runner is explicitly opt-in:
+## Internal versus public trace
+
+Internal `InvestigationTrace` retains detailed local telemetry for evaluation:
+action records, model usage, cache timings, evidence counts, citation counts,
+answer citation validation, and latency. `AgentStepTrace` may contain detailed
+metadata for local diagnostics.
+
+The public trace is a separate deterministic projection. It exposes only:
 
 ```text
-python -m evals.runner
-python -m evals.runner --case requests-session-002
-python -m evals.runner --all --confirm-live
+action_number
+tool
+repository-relative path or search query
+observed line range when applicable
+short result summary/count
 ```
 
-The first command only prints usage. The full suite is rejected without
-`--confirm-live`. Diagnostics follow the same explicit-selection policy:
+Host filesystem paths, environment data, API keys, system prompts, raw tool
+returns, and chain-of-thought are never copied into the public event.
 
-```text
-python -m evals.run_diagnostics --case httpx-transport-004
-python -m evals.run_diagnostics --all --confirm-live
-```
+## Frontend
 
-Offline unit tests do not start either live runner.
+A small existing vanilla JavaScript frontend now renders:
 
-## Deliberately separate final-answer pass
+- streamed Markdown answer text;
+- citation IDs with file and line ranges, linking to immutable GitHub URLs
+  when safely available; and
+- the sanitized investigation path.
 
-The investigation agent currently returns structured evidence metadata while
-the final-answer service owns presentation and streaming. Combining them could
-save one model pass and avoid resending evidence, but it would couple evidence
-validation, retry behavior, answer formatting, and model selection. It would
-also make streaming structured output more complex. This remains a future
-optimization, not part of the current cache phase.
+No frontend framework or new dependency was added. The backend SSE contract is
+the stable integration boundary for future richer citation highlighting.
 
-## Future: Investigation Context Efficiency
+## Dependencies and deliberately excluded systems
 
-* Phase F bounded reads reduce individual tool-result size.
-* Final-answer evidence reconstruction dramatically reduces final-answer context.
-* PydanticAI investigation history remains a cost hotspot.
-* Experimental removal/compaction of older ToolReturnPart content caused behavioral regressions.
-* Production therefore currently preserves full PydanticAI history for correctness.
-* Future options include:
-    * structured external working memory
-    * model-visible compact evidence ledger
-    * summarization/checkpointing designed into the agent state
-    * manual multi-step orchestration with controlled message history
-    * provider-side context caching after architecture stabilizes
-    * revisiting PydanticAI capabilities if newer framework versions provide safer memory management
+Phase G uses existing dataclasses, Pydantic models, FastAPI streaming, and
+standard-library URL/regex utilities. No dependency was added. Trace does not
+use LangChain, LlamaIndex, embeddings, a vector database, RAG infrastructure,
+Langfuse, Redis, or provider-side Gemini context caching.
+
+## Context-efficiency limitation
+
+Bounded reads and selected final evidence reduce individual and answer-pass
+context size. PydanticAI investigation history is intentionally replayed
+normally for correctness. A ProcessHistory/history-compaction experiment was
+tested and rejected because older tool outputs disappearing from conversational
+memory caused the agent to reread files incorrectly. Exact investigation
+caching mitigates repeated identical questions; history trimming remains
+deferred.
+
+## Future UI and observability work
+
+The current source list is intentionally simple. A future UI can make inline
+`[1]` tokens clickable and show expandable source excerpts, while continuing to
+use only citation metadata supplied by the backend. The existing structured
+`InvestigationTrace` is sufficient for local development and evaluation; a
+centralized tracing dependency should be considered only after a concrete
+multi-process operational need appears.

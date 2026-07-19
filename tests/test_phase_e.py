@@ -243,7 +243,7 @@ def test_investigation_cache_hit_skips_agent_and_keeps_current_usage_zero(tmp_pa
 
     with patch("app.services.investigation_service.investigation_agent.run", new=AsyncMock(side_effect=AssertionError("agent ran"))), \
          patch("app.services.investigation_service.prepare_answer_stream", return_value=AnswerGeneratorResult(0, iter(["answer"]))):
-        print('CACHE CONTENTS:'); import os; os.system(f'cat {tmp_path}/cache/investigations/*.json'); print('CACHE CONTENTS:'); import os; os.system(f'cat {tmp_path}/cache/investigations/*.json'); events = asyncio.run(collect())
+        events = asyncio.run(collect())
 
     assert events[-1].__class__.__name__ == "InvestigationCompleted"
     assert trace.investigation_cache_hit is True
@@ -251,6 +251,9 @@ def test_investigation_cache_hit_skips_agent_and_keeps_current_usage_zero(tmp_pa
     assert trace.input_tokens == 0
     assert trace.output_tokens == 0
     assert trace.evidence_file_paths == ["main.py"]
+    from app.investigation_events import CitationMetadata
+    citation_events = [event for event in events if isinstance(event, CitationMetadata)]
+    assert citation_events and citation_events[0].citations[0]["path"] == "main.py"
 
 
 def test_eval_runner_is_explicit_and_dispatches_without_running_live_calls():
