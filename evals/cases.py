@@ -97,10 +97,107 @@ pydantic_types_case = EvaluationCase(
     }
 )
 
+click_exceptions_case = EvaluationCase(
+    id="click-exceptions-001",
+    repository_url="https://github.com/pallets/click",
+    question="What exception class is raised when a user provides an invalid choice for a choice option, and where is this exception defined and raised?",
+    expected_evidence_groups=[
+        EvidenceGroupRequirement(
+            name="Choice Validation",
+            alternatives={"src/click/types.py"}
+        )
+    ],
+    expected_concrete_implementations={"src/click/types.py"},
+    expected_answer_terms={
+        "BadParameter",
+        "Choice",
+        "convert",
+        "fail"
+    }
+)
+
+drf_oauth_case = EvaluationCase(
+    id="drf-oauth-002",
+    repository_url="https://github.com/encode/django-rest-framework",
+    question="Explain the implementation details of the custom OAuth1 authentication class. In which file is this authentication class defined, and what is its validation logic?",
+    expected_evidence_groups=[],
+    expected_concrete_implementations=set(),
+    expected_answer_terms={
+        "not supported",
+        "not implemented"
+    },
+    require_absence_searches=["oauth"],
+    require_absence_files=["rest_framework/authentication.py"],
+    forbid_citations=True
+)
+
+fastapi_dependencies_case = EvaluationCase(
+    id="fastapi-dependencies-003",
+    repository_url="https://github.com/tiangolo/fastapi",
+    question="How does FastAPI resolve and execute dependencies? Trace the execution flow inside fastapi/dependencies/utils.py and identify the helper functions that resolve dependencies, handle generators, and run synchronous dependencies in a thread pool.",
+    expected_evidence_groups=[
+        EvidenceGroupRequirement(
+            name="Dependency Resolution",
+            alternatives={"fastapi/dependencies/utils.py"}
+        )
+    ],
+    expected_concrete_implementations={"fastapi/dependencies/utils.py"},
+    expected_answer_terms={
+        "solve_dependencies",
+        "solve_generator",
+        "run_in_threadpool"
+    }
+)
+
+pytest_plugins_case = EvaluationCase(
+    id="pytest-plugins-004",
+    repository_url="https://github.com/pytest-dev/pytest",
+    question="How does pytest dynamically register and load external plugins? Which file and class defines the plugin manager, how are setuptools entrypoints discovered, and where does pytest load plugins registered via pytest_plugins?",
+    expected_evidence_groups=[
+        EvidenceGroupRequirement(
+            name="Plugin Manager",
+            alternatives={"src/_pytest/config/__init__.py"}
+        )
+    ],
+    expected_concrete_implementations={"src/_pytest/config/__init__.py"},
+    expected_answer_terms={
+        "PytestPluginManager",
+        "load_setuptools_entrypoints",
+        "consider_module",
+        "pytest_plugins",
+        "pluggy"
+    }
+)
+
+cache_reconstruction_case = EvaluationCase(
+    id="cache-reconstruction-005",
+    repository_url="https://github.com/pallets/click",
+    question="What exception class is raised when a user provides an invalid choice for a choice option, and where is this exception defined and raised?",
+    expected_evidence_groups=[
+        EvidenceGroupRequirement(
+            name="Choice Validation",
+            alternatives={"src/click/types.py"}
+        )
+    ],
+    expected_concrete_implementations={"src/click/types.py"},
+    expected_answer_terms={
+        "BadParameter",
+        "Choice",
+        "convert"
+    },
+    require_cache_hit=True
+)
+
 ALL_CASES = [
     fastapi_users_bearer_case,
     requests_session_case,
     flask_globals_case,
     httpx_transport_case,
-    pydantic_types_case
+    pydantic_types_case,
+    click_exceptions_case,
+    drf_oauth_case,
+    fastapi_dependencies_case,
+    pytest_plugins_case,
+    cache_reconstruction_case
 ]
+

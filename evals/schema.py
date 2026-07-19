@@ -12,6 +12,11 @@ class EvaluationCase(BaseModel):
     expected_evidence_groups: list[EvidenceGroupRequirement] = Field(default_factory=list)
     expected_concrete_implementations: set[str] = Field(default_factory=set)
     expected_answer_terms: set[str]
+    require_absence_searches: list[str] = Field(default_factory=list)
+    require_absence_files: list[str] = Field(default_factory=list)
+    forbid_citations: bool = False
+    require_cache_hit: bool = False
+
 
 class RunMetadata(BaseModel):
     timestamp: str

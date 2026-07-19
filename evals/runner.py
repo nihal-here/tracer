@@ -103,12 +103,54 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
     citation_usage = len(citation_ids_used) > 0 if len(citation_ids_supplied) > 0 else True
     citation_coverage = len(set(citation_ids_used).intersection(set(citation_ids_supplied))) / len(citation_ids_supplied) if len(citation_ids_supplied) > 0 else 1.0
 
+    forbidden_citations_satisfied = not case.forbid_citations or len(citation_ids_used) == 0
+
     concrete_implementation_grounding = score_concrete_implementation(
         selected_paths=selected_evidence_paths,
         expected_implementations=case.expected_concrete_implementations
     )
 
-    evaluation_pass = execution_success and (evidence_score == 1.0) and citations_valid and citation_usage and concrete_implementation_grounding
+    absence_verified = True
+    if case.require_absence_searches or case.require_absence_files:
+        has_search = False
+        has_file_read = False
+        for step in trace.steps:
+            if step.action_chosen == "search_code" and step.search_code_metadata:
+                query = step.search_code_metadata.query.lower()
+                if any(s.lower() in query for s in case.require_absence_searches):
+                    has_search = True
+            elif step.action_chosen == "read_file" and step.read_file_metadata:
+                path = step.read_file_metadata.requested_path.lower()
+                if any(f.lower() in path for f in case.require_absence_files):
+                    has_file_read = True
+        
+        search_ok = not case.require_absence_searches or has_search
+        file_ok = not case.require_absence_files or has_file_read
+        absence_verified = search_ok and file_ok
+
+    cache_hit_verified = True
+    if case.require_cache_hit:
+        cache_hit_verified = (
+            trace.investigation_cache_hit
+            and trace.model_requests == 0
+            and len(trace.steps) == 0
+            and len(trace.cached_investigation_tool_sequence) > 0
+            and citations_valid
+        )
+
+    evaluation_pass = (
+        execution_success
+        and (evidence_score == 1.0)
+        and citations_valid
+        and citation_usage
+        and concrete_implementation_grounding
+        and absence_verified
+        and cache_hit_verified
+        and forbidden_citations_satisfied
+    )
+
+
+
 
     return EvaluationResult(
         metadata=RunMetadata(
