@@ -42,6 +42,10 @@ class InvestigationResult(BaseModel):
     concrete_implementations_read: list[DelegatedImplementationEvidence] = Field(
         description="List explicitly mapping every discovered delegated interface to the exact implementation excerpts you read."
     )
+    absence_concluded: bool = Field(
+        default=False,
+        description="Set to True if you have verified that the requested feature, class, function, or logical mechanism does not exist in the codebase."
+    )
 
 
 INVESTIGATION_MODEL = "google:gemini-3.1-flash-lite"
@@ -54,6 +58,11 @@ Investigation strategy:
 - Use 'search_code' for symbol or text discovery. Scope it with 'target_directory' when you expect noisy global results.
 - Use 'read_file' around that line to follow delegated implementations. Avoid reading large files from line 1 when search results already identify the relevant location.
 - Use narrow line windows around symbols and expand ranges only when needed.
+- CRITICAL: 'search_code' performs a literal substring search. Regular expressions, wildcards (e.g. '.*'), and character escapes (e.g. '\\(') are treated as literal characters and will fail to match. Always search for plain alphanumeric substrings (e.g. search for 'class Choice' instead of 'class .*Choice').
+- If a file path is explicitly named in the repository map, the user's question, or in previous search results, you must directly call 'read_file' on that path. Do NOT call 'list_directory' or 'search_code' to 'rediscover' or navigate to known files.
+- EFFICIENT EXACT-SYMBOL SEARCH: When the user's question names specific classes, functions, methods, or identifiers, prioritize searching directly for those exact identifiers before tracing broader orchestration or control flow. (Broader tracing may still be necessary after locating the explicitly requested symbols.)
+- REFINE NOISY SEARCHES: If a search returns many or noisy results (for example, more than 10 matches), do not respond by reading a large file from line 1. Refine the literal search query using a more specific class, function, method, or identifier name (e.g., search for 'class PytestPluginManager' or 'def load_setuptools_entrypoints'), then use a narrow read_file window around the resulting location.
+
 
 CRITICAL EVIDENCE-COMPLETENESS POLICY:
 - If evidence delegates an important mechanism to another symbol, interface, strategy, or abstraction, YOU MUST FOLLOW THAT DEPENDENCY into its concrete implementation before finishing.
@@ -66,6 +75,10 @@ CRITICAL EVIDENCE-COMPLETENESS POLICY:
     4. Use `read_file` on the sibling module to read the concrete implementation.
     5. Record that observed concrete implementation evidence in `concrete_implementations_read`.
 - Avoid exhaustive traversal unrelated to the user's question, but core requested mechanisms must be traced down to their concrete logic.
+- EXTERNAL DELEGATION POLICY: If a requested or delegated implementation belongs to a dependency whose source is not present in the current repository snapshot, do not waste actions attempting to locate its implementation. Clearly identify the external delegation and ground the answer in the repository-side call/import evidence that was actually read.
+
+NEGATIVE EVIDENCE POLICY:
+- If you confirm that the requested feature, code, or abstraction is absent, not implemented, or not supported by the repository after checking the relevant modules, you must immediately stop searching, set 'absence_concluded=True' in your final response, and you may leave 'relevant_excerpts' empty. Do not perform exhaustive searching or directory listing once absence is established.
 
 FINAL EVIDENCE GROUNDING:
 - You must explicitly select `relevant_excerpts` in your final result.
@@ -92,9 +105,10 @@ def validate_evidence_completeness(ctx: RunContext[AgentDeps], result: Investiga
     """
     workspace = ctx.deps.workspace
 
-    if not result.relevant_excerpts:
+    if not result.relevant_excerpts and not result.absence_concluded:
         raise ModelRetry(
-            "You did not provide any relevant_excerpts. You must select the exact observed line ranges that support your answer."
+            "You did not provide any relevant_excerpts. You must select the exact observed line ranges that support your answer, "
+            "or set 'absence_concluded' to True if you have verified that the requested feature or code is absent."
         )
 
     if result.delegated_interfaces_discovered:
@@ -199,7 +213,7 @@ def read_file(ctx: RunContext[AgentDeps], file_path: str, start_line: int | None
 
 @investigation_agent.tool
 def search_code(ctx: RunContext[AgentDeps], search_query: str, case_sensitive: bool = False, target_directory: str | None = None) -> str:
-    """Search for a literal substring. Optionally: 'case_sensitive' (default false), 'target_directory' (restrict scope)."""
+    """Search for a literal substring. Regular expressions, wildcards (e.g. '.*'), and character escapes (e.g. '\\(') are NOT supported and will fail to match. Optionally: 'case_sensitive' (default false), 'target_directory' (restrict scope)."""
     _check_domain_termination(ctx.deps)
 
     workspace = ctx.deps.workspace
@@ -232,7 +246,14 @@ def search_code(ctx: RunContext[AgentDeps], search_query: str, case_sensitive: b
     ctx.deps.trace.steps.append(step_trace)
 
     _check_domain_termination(ctx.deps)
+    if obs.result_status == "budget_exhausted":
+        return (
+            "ERROR: Your search budget of 4 queries is fully exhausted. All subsequent search_code calls will fail. "
+            "DO NOT call search_code again. You must navigate using read_file/list_directory on already discovered paths, "
+            "or conclude your investigation."
+        )
     return obs.content if obs.content is not None else obs.result_status
+
 
 
 @investigation_agent.tool

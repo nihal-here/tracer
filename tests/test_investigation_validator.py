@@ -80,3 +80,28 @@ def test_validator_fails_if_unobserved_lines_claimed(workspace_with_evidence):
     ctx = cast(RunContext[AgentDeps], cast(Any, MockContext(deps=MockDeps(workspace=workspace_with_evidence))))
     with pytest.raises(ModelRetry, match="were never observed"):
         validate_evidence_completeness(ctx, result)  # type: ignore
+
+def test_validator_allows_empty_excerpts_if_absence_concluded(workspace_with_evidence):
+    result = InvestigationResult(
+        summary_of_evidence="We confirmed that the requested class does not exist in the codebase.",
+        delegated_interfaces_discovered=[],
+        relevant_excerpts=[],
+        concrete_implementations_read=[],
+        absence_concluded=True
+    )
+    ctx = cast(RunContext[AgentDeps], cast(Any, MockContext(deps=MockDeps(workspace=workspace_with_evidence))))
+    res = validate_evidence_completeness(ctx, result)  # type: ignore
+    assert res == result
+    assert res.absence_concluded
+
+def test_validator_fails_without_excerpts_if_not_absence_concluded(workspace_with_evidence):
+    result = InvestigationResult(
+        summary_of_evidence="No evidence found.",
+        delegated_interfaces_discovered=[],
+        relevant_excerpts=[],
+        concrete_implementations_read=[],
+        absence_concluded=False
+    )
+    ctx = cast(RunContext[AgentDeps], cast(Any, MockContext(deps=MockDeps(workspace=workspace_with_evidence))))
+    with pytest.raises(ModelRetry, match="You did not provide any relevant_excerpts"):
+        validate_evidence_completeness(ctx, result)  # type: ignore

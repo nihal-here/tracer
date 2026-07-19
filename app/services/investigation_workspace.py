@@ -122,7 +122,7 @@ def _validate_directory_arg(raw: str | None, root: Path) -> Path | None:
 
 
 class InvestigationWorkspace:
-    MAX_ACTIONS: int = 8
+    MAX_ACTIONS: int = 10
     MAX_UNIQUE_FILES: int = 8
     MAX_FILE_CHARS: int = 20_000
     MAX_TOTAL_EVIDENCE_CHARS: int = 80_000
@@ -140,7 +140,7 @@ class InvestigationWorkspace:
     # ----------------------------
     # LIST_DIRECTORY has NO independent counter.  Every call costs one
     # investigation iteration (enforced by the outer while loop in the
-    # service, which checks can_continue() / MAX_ACTIONS=8 before each
+    # service, which checks can_continue() / MAX_ACTIONS=10 before each
     # action).  This is the simplest defensible policy because:
     #   - The iteration cap already bounds total LIST_DIRECTORY calls.
     #   - LIST_DIRECTORY is cheap (pure Python over allowed_paths).
