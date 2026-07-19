@@ -169,6 +169,7 @@ async def run_investigation(
 
             try:
                 from pydantic_ai.usage import UsageLimits
+                
                 MAX_MODEL_REQUESTS = 20
                 result = await investigation_agent.run(
                     prompt,

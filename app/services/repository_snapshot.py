@@ -86,6 +86,7 @@ class RepositorySnapshot:
 
         try:
             root.mkdir(parents=True, exist_ok=True)
+            self._cleanup_expired_snapshots(root)
             with _snapshot_lock(key):
                 cached_files = self._load_cached_entry(final_entry)
                 if cached_files is not None:
@@ -128,6 +129,21 @@ class RepositorySnapshot:
         finally:
             self.cache_lookup_duration_sec = time.perf_counter() - started
             logger.debug("Repository snapshot cache lookup/materialization took %.6fs", self.cache_lookup_duration_sec)
+
+    def _cleanup_expired_snapshots(self, root: Path) -> None:
+        max_age = os.environ.get("TRACE_SNAPSHOT_CACHE_TTL_SECONDS")
+        if not max_age:
+            return
+        
+        try:
+            max_age_float = float(max_age)
+            now = time.time()
+            for entry in root.iterdir():
+                if entry.is_dir() and entry.name != "extracted":
+                    if now - entry.stat().st_mtime > max_age_float:
+                        shutil.rmtree(entry, ignore_errors=True)
+        except (ValueError, OSError):
+            pass
 
     def _materialize_temporary(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()

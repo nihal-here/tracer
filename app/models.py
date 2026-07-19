@@ -1,9 +1,9 @@
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field
 
 
 class InvestigateRequest(BaseModel):
     repo: HttpUrl
-    question: str
+    question: str = Field(..., max_length=1000)
 
 
 class InvestigateResponse(BaseModel):
@@ -11,7 +11,7 @@ class InvestigateResponse(BaseModel):
     provider: str
     owner: str
     name: str
-    question: str
+    question: str = Field(..., max_length=1000)
     description: str | None
     stars: int
     language: str | None

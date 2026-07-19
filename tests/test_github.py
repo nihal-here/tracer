@@ -135,7 +135,8 @@ class TestGitHubRepository(unittest.TestCase):
 
     @patch("app.services.repository_snapshot.requests.get")
     def test_snapshot_cleanup_on_failure(self, mock_get):
-        from app.services.repository_snapshot import RepositorySnapshot, RepositoryArchiveTooLargeError
+        from app.services.repository_snapshot import RepositorySnapshot
+        from app.services.github import RepositoryArchiveTooLargeError
         from pathlib import Path
         repo = GitHubRepository(owner="testowner", name="testrepo", revision="abc", default_branch="main", metadata={})
         snapshot = RepositorySnapshot(repo, cache_dir=Path(tempfile.mkdtemp(prefix="trace-test-snapshot-cleanup-")))
@@ -238,6 +239,16 @@ def test_malicious_archive_rejection():
             mock_get.return_value.__enter__.return_value = mock_resp
             # It should safely skip the symlink without error
             snap._do_materialize(archive_path, Path(tmp_dir) / "ext2")
+
+
+def test_github_error_boundary_too_large():
+    from fastapi import HTTPException
+    from app.services.investigation_service import github_error_boundary
+    from app.services.github import RepositoryArchiveTooLargeError
+    with pytest.raises(HTTPException) as exc_info:
+        with github_error_boundary():
+            raise RepositoryArchiveTooLargeError("Too big")
+    assert exc_info.value.status_code == 413
 
 
 def test_malicious_archive_budgets():

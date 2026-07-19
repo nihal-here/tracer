@@ -104,6 +104,7 @@ class InvestigationCache:
     def put(self, key: InvestigationCacheKey, value: dict[str, Any]) -> None:
         path = self._path_for(key)
         self.entries_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_expired_entries()
         payload = {
             "cache_schema_version": INVESTIGATION_CACHE_SCHEMA_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -123,3 +124,18 @@ class InvestigationCache:
             except OSError:
                 pass
             raise
+
+    def _cleanup_expired_entries(self) -> None:
+        max_age = os.environ.get("TRACE_INVESTIGATION_CACHE_TTL_SECONDS")
+        if not max_age:
+            return
+            
+        try:
+            max_age_float = float(max_age)
+            now = time.time()
+            for entry in self.entries_dir.iterdir():
+                if entry.is_file() and entry.suffix == ".json":
+                    if now - entry.stat().st_mtime > max_age_float:
+                        entry.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            pass

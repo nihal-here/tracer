@@ -89,15 +89,34 @@ class GitHubRepository:
 
     @classmethod
     def from_url(cls, repo_url: str) -> "GitHubRepository":
-        repo_str = str(repo_url)
-        if not repo_str.startswith("https://github.com/"):
-            raise InvalidGitHubURLError("Only GitHub repository URLs are supported")
+        from urllib.parse import urlparse, unquote
+        repo_str = str(repo_url).strip()
+        if len(repo_str) > 500:
+            raise InvalidGitHubURLError("Repository URL is too long")
 
-        path_part = repo_str.removeprefix("https://github.com/")
+        parsed = urlparse(repo_str)
+        if parsed.scheme != "https":
+            raise InvalidGitHubURLError("Only HTTPS GitHub repository URLs are supported")
+        if parsed.netloc.lower() != "github.com":
+            raise InvalidGitHubURLError("Host must be github.com")
+        if parsed.username or parsed.password:
+            raise InvalidGitHubURLError("Credentials in URL are not supported")
+        if parsed.query or parsed.fragment:
+            raise InvalidGitHubURLError("Query parameters and fragments are not supported")
+
+        path_part = unquote(parsed.path)
+        if not path_part.startswith("/"):
+            raise InvalidGitHubURLError("Repository URL path must start with /")
+        
+        path_part = path_part.removeprefix("/")
         parts = path_part.split("/")
 
         if len(parts) != 2 or not parts[0] or not parts[1]:
             raise InvalidGitHubURLError("Repository URL must be exactly https://github.com/{owner}/{repo}")
+
+        # Check for control characters or path traversal
+        if any(c < ' ' for c in path_part) or ".." in parts:
+            raise InvalidGitHubURLError("Invalid characters in repository URL")
 
         owner = parts[0]
         name = parts[1].removesuffix(".git")

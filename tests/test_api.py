@@ -19,10 +19,11 @@ def test_investigate_endpoint_eager_error(mock_from_url):
         "repo": "https://github.com/bad/url/issues/1",
         "question": "What is this repo?"
     }
-    response = client.post("/investigate", json=payload)
+    with TestClient(app) as client:
+        response = client.post("/investigate", json=payload)
 
-    assert response.status_code == 400
-    assert response.json() == {"detail": "Bad URL"}
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Bad URL"}
 
 def test_sse_adapter_mapping():
     from app.main import _sse_adapter

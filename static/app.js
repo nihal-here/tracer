@@ -97,8 +97,9 @@ document.addEventListener("DOMContentLoaded", () => {
                                 }
                                 if (data.chunk) {
                                     fullAnswer += data.chunk;
-                                    // Populate Answer with Marked.js
-                                    answerBox.innerHTML = marked.parse(fullAnswer);
+                                    // Populate Answer with Marked.js and sanitize with DOMPurify
+                                    const rawHtml = marked.parse(fullAnswer);
+                                    answerBox.innerHTML = DOMPurify.sanitize(rawHtml);
                                     
                                     // Apply highlight.js to code blocks
                                     document.querySelectorAll('pre code').forEach((block) => {

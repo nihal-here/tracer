@@ -6,13 +6,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def generate_answer(prompt: str) -> str:
+def get_gemini_api_key() -> str:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set")
+    return api_key
 
-    client = genai.Client(api_key=api_key)
-    model = os.environ.get("TRACE_LLM_MODEL", "gemini-3.1-flash-lite")
+def get_llm_model_name() -> str:
+    return os.environ.get("TRACE_LLM_MODEL", "gemini-3.1-flash-lite")
+
+def generate_answer(prompt: str) -> str:
+    client = genai.Client(api_key=get_gemini_api_key())
+    model = get_llm_model_name()
 
     response = client.models.generate_content(
         model=model,
@@ -23,12 +28,8 @@ def generate_answer(prompt: str) -> str:
 
 
 def generate_answer_stream(prompt: str):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set")
-
-    client = genai.Client(api_key=api_key)
-    model = os.environ.get("TRACE_LLM_MODEL", "gemini-3.1-flash-lite")
+    client = genai.Client(api_key=get_gemini_api_key())
+    model = get_llm_model_name()
 
     response_stream = client.models.generate_content_stream(
         model=model,

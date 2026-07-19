@@ -159,6 +159,18 @@ memory caused the agent to reread files incorrectly. Exact investigation
 caching mitigates repeated identical questions; history trimming remains
 deferred.
 
+## Security and Deployment (Phase H)
+
+Trace is hardened for safe portfolio demonstration via structural and operational constraints:
+
+- **Input Validation**: `InvestigateRequest` enforces a strict 1000-character maximum limit for questions. GitHub repository URLs are parsed using strict HTTPS/host requirements with aggressive unquoting and traversal character filtering (`..`) before any network interaction.
+- **Rate Limiting**: IP-based rate limiting (default 5/min) is embedded in the request cycle. Proxied `X-Forwarded-For` identities are trusted *only* if explicitly enabled via `TRUST_X_FORWARDED_FOR="true"` to prevent bypassing limits in a direct-exposure deployment.
+- **Concurrency Isolation**: A strict `asyncio.Semaphore` (default 2) caps concurrent investigations, immediately rejecting excess traffic with HTTP 503 rather than infinitely queuing. Client disconnects automatically cancel investigations via `asyncio.CancelledError`.
+- **Markdown Sanitization**: Server-streamed answer Markdown is rendered via a vendored `marked.min.js` and explicitly sanitized via a vendored `DOMPurify` before any assignment to `innerHTML`. No other dynamic content modifies `innerHTML` unsafely.
+- **Cache TTL**: Repository snapshots and investigation results use lazy Time-to-Live (TTL) cleanup triggered opportunistically during cache operations. Expired directories/files are reclaimed without a background daemon. Missing or expired caches simply trigger safe recomputation.
+- **Security Headers**: All responses include strict `X-Content-Type-Options`, `Referrer-Policy`, and a tight `Content-Security-Policy` omitting unsafe inline scripts or unnecessary remote API connect domains.
+- **Deployment Assumptions**: The backend operates in a stateless container (`Dockerfile` provided), resolving API credentials globally from `GEMINI_API_KEY`. Blocking I/O operations (like repository materialization) execute in `asyncio.to_thread` to preserve FastAPI event-loop health.
+
 ## Future UI and observability work
 
 The current source list is intentionally simple. A future UI can make inline
