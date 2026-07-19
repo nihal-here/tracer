@@ -36,7 +36,9 @@ jobs:
 
       - name: Type Check (BasedPyright)
         run: |
-          npx -y basedpyright app tests evals --level error
+          npx -y basedpyright app tests evals --outputjson > pyright.json || true
+          npx -y basedpyright app tests evals || true
+          node -e "if (require('./pyright.json').summary.errorCount > 0) process.exit(1);"
 
       - name: Run Tests (Offline)
         env:
