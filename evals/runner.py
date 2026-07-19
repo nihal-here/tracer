@@ -7,10 +7,10 @@ from app.services.github import GitHubRepository
 from app.services.repository_snapshot import RepositorySnapshot
 from app.services.investigation_service import run_investigation
 from app.investigation_trace import InvestigationTrace, trace_to_dict
-from app.investigation_events import InvestigationAnswerChunk, InvestigationCompleted
+from app.investigation_events import InvestigationAnswerChunk, InvestigationCompleted, CitationMetadata
 from evals.schema import RunMetadata, EvaluationResult, EvaluationCase, SuiteSummary, SuiteEvaluationResult
 from evals.cases import ALL_CASES
-from evals.scorer import score_evidence_completeness, score_expected_terms
+from evals.scorer import score_evidence_completeness, score_expected_terms, extract_used_citation_ids, score_concrete_implementation
 
 import os
 
@@ -38,6 +38,7 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
     )
 
     answer_chunks = []
+    citation_ids_supplied = []
     t_inv_start = time.perf_counter()
     t_inv_end = None
 
@@ -47,6 +48,8 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
                 if t_inv_end is None:
                     t_inv_end = time.perf_counter()
                 answer_chunks.append(event.chunk)
+            elif isinstance(event, CitationMetadata):
+                citation_ids_supplied = [str(c["citation_id"]) for c in event.citations]
             elif isinstance(event, InvestigationCompleted):
                 pass
     except Exception as e:
@@ -83,7 +86,8 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
         if step.action_chosen == "read_file" and file_path and file_path not in files_read:
             files_read.append(file_path)
 
-    evidence_score = score_evidence_completeness(files_read, case.expected_evidence_groups)
+    selected_evidence_paths = set(trace.evidence_file_paths)
+    evidence_score = score_evidence_completeness(list(selected_evidence_paths), case.expected_evidence_groups)
     execution_success = getattr(trace.termination_reason, 'value', trace.termination_reason) == "model_finished"
     
     if execution_success:
@@ -91,7 +95,20 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
     else:
         terms_score = 0.0
 
-    evaluation_pass = execution_success and (evidence_score == 1.0)
+    # Phase I Evaluation metrics
+    citation_ids_used = extract_used_citation_ids(final_answer)
+    citation_ids_invalid = [cid for cid in citation_ids_used if cid not in citation_ids_supplied]
+
+    citations_valid = len(citation_ids_invalid) == 0
+    citation_usage = len(citation_ids_used) > 0 if len(citation_ids_supplied) > 0 else True
+    citation_coverage = len(set(citation_ids_used).intersection(set(citation_ids_supplied))) / len(citation_ids_supplied) if len(citation_ids_supplied) > 0 else 1.0
+
+    concrete_implementation_grounding = score_concrete_implementation(
+        selected_paths=selected_evidence_paths,
+        expected_implementations=case.expected_concrete_implementations
+    )
+
+    evaluation_pass = execution_success and (evidence_score == 1.0) and citations_valid and citation_usage and concrete_implementation_grounding
 
     return EvaluationResult(
         metadata=RunMetadata(
@@ -105,6 +122,13 @@ async def evaluate_case(case: EvaluationCase, run_dir: str | None = None, max_ac
         evaluation_pass=evaluation_pass,
         evidence_completeness_score=evidence_score,
         answer_expected_terms_score=terms_score,
+        concrete_implementation_grounding=concrete_implementation_grounding,
+        citation_ids_supplied=citation_ids_supplied,
+        citation_ids_used=citation_ids_used,
+        citation_ids_invalid=citation_ids_invalid,
+        citations_valid=citations_valid,
+        citation_usage=citation_usage,
+        citation_coverage=citation_coverage,
         files_read=files_read,
         tool_sequence=tool_sequence,
         searches_used=sum(1 for s in tool_sequence if s == "search_code"),

@@ -18,6 +18,7 @@ fastapi_users_bearer_case = EvaluationCase(
             alternatives={"fastapi_users/authentication/strategy/jwt.py", "fastapi_users/authentication/strategy/redis.py"}
         )
     ],
+    expected_concrete_implementations={"fastapi_users/authentication/strategy/jwt.py", "fastapi_users/authentication/strategy/redis.py"},
     expected_answer_terms={
         "BearerTransport",
         "Authenticator",
@@ -71,6 +72,7 @@ httpx_transport_case = EvaluationCase(
             alternatives={"httpx/_transports/default.py", "httpx/_transports/asgi.py"}
         )
     ],
+    expected_concrete_implementations={"httpx/_transports/default.py", "httpx/_transports/asgi.py"},
     expected_answer_terms={
         "AsyncClient",
         "send",

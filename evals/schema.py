@@ -9,7 +9,8 @@ class EvaluationCase(BaseModel):
     id: str
     repository_url: str
     question: str
-    expected_evidence_groups: list[EvidenceGroupRequirement]
+    expected_evidence_groups: list[EvidenceGroupRequirement] = Field(default_factory=list)
+    expected_concrete_implementations: set[str] = Field(default_factory=set)
     expected_answer_terms: set[str]
 
 class RunMetadata(BaseModel):
@@ -39,6 +40,16 @@ class EvaluationResult(BaseModel):
     investigation_latency: Optional[float] = None
     answer_generation_latency: Optional[float] = None
     total_latency: Optional[float] = None
+    concrete_implementation_grounding: bool | None = None
+
+    # Phase I Evaluation metrics
+    citation_ids_supplied: list[str] = Field(default_factory=list)
+    citation_ids_used: list[str] = Field(default_factory=list)
+    citation_ids_invalid: list[str] = Field(default_factory=list)
+    citations_valid: bool | None = None
+    citation_usage: bool | None = None
+    citation_coverage: float | None = None
+
     termination_reason: Optional[str] = None
     evidence_char_count: int
     note: str = "per-request context growth is not yet measured"
