@@ -143,6 +143,3 @@ Trace includes a deterministic evaluation harness to measure accuracy and ground
 - Rate limiting/concurrency controls are local to one process.
 - Cache is best-effort local filesystem state.
 - Intended as a portfolio/demo application rather than unrestricted production SaaS.
-
-## Demo
-
