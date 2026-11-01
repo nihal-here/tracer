@@ -1,22 +1,14 @@
-# Trace: Evidence-Grounded AI Repository Investigator
+# Trace
 
-## Project Introduction
+A side project: give it a public GitHub repository and a question about the code. It reads the code at a fixed commit and answers with links to the lines it used. Built with Python, FastAPI, PydanticAI and Gemini. It is a demo, not a production service.
 
-Trace is an evidence-grounded AI repository investigation tool that accepts a public GitHub repository and an engineering question, resolves the repository to an immutable commit, investigates the codebase using bounded local tools, validates observed evidence, and produces a streamed answer with deterministic source citations and a public-safe investigation trace.
+## What it does
 
-## Key Differentiators
-
-- **Immutable commit-pinned repository snapshots**: Resolves targets to an exact Git SHA to ensure reproducible investigations.
-- **Local repository investigation**: Works on a local filesystem snapshot instead of making repeated, slow GitHub API calls.
-- **PydanticAI tool-based investigation**: Driven by a state-of-the-art agent orchestration framework using PydanticAI.
-- **Bounded read_file, search_code, and list_directory**: Safe, highly constrained tools that prevent runaway token consumption.
-- **EvidenceSpan / EvidenceExcerpt grounding validation**: Enforces that the model only cites exact lines it verifiably observed.
-- **Concrete implementation traversal/validation**: Validates that agents reach actual implementations instead of hallucinating based on interfaces.
-- **Deterministic source citations**: Generates immutable GitHub commit URLs for verified evidence.
-- **Public-safe investigation traces**: Streams sanitized paths without leaking chain-of-thought, API keys, or raw prompts.
-- **Exact filesystem snapshot/investigation caching**: Skips redundant work with deterministic caching.
-- **SSE streaming**: Byte-by-byte streaming for a responsive UI.
-- **Phase H security protections**: Hardened with rate limits, concurrency controls, and strict CSPs.
+- Pins the repository to an exact commit, so answers are reproducible.
+- Investigates a local snapshot with bounded `read_file`, `search_code` and `list_directory` tools, instead of repeated GitHub API calls.
+- Checks that every cited line was actually read, and links each citation to that commit on GitHub.
+- Streams the answer to the browser (SSE) with a trace of what was looked at, without exposing prompts or keys.
+- Includes rate limiting, concurrency limits and a strict Content-Security-Policy for public use.
 
 ## Architecture
 
@@ -154,4 +146,3 @@ Trace includes a deterministic evaluation harness to measure accuracy and ground
 
 ## Demo
 
-> **Note:** A final screenshot/GIF will be added after the post-Phase-I local smoke test.
